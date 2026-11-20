@@ -305,11 +305,10 @@ app.get("/api/cartes/recherche", async (req, res) => {
   }
 });
 
-// --- 3. Statistiques de stock et réacheminements actifs ---
+// --- 3. Statistiques de stock et réacheminements actifs (entre agences uniquement) ---
 app.get("/api/stats", async (req, res) => {
   try {
     const agenceAgent = req.query.agence || "";
-    const roleAgent = req.query.role || "AGENT";
 
     const parDepartement = {
       BIANKOUMA: 0,
@@ -341,18 +340,7 @@ app.get("/api/stats", async (req, res) => {
        ORDER BY id DESC`
     );
 
-    const roleNorm = normaliserTexte(roleAgent);
     const agenceAgentNorm = normaliserAgence(agenceAgent);
-    const estSuperviseur =
-      roleNorm === "SUPERVISEUR" ||
-      roleNorm === "PATRON" ||
-      roleNorm === "CHEF D'EQUIPE" ||
-      roleNorm === "CHEF_EQUIPE" ||
-      roleNorm === "CHEF EQUIPE" ||
-      roleNorm === "SUP" ||
-      roleNorm === "CE" ||
-      agenceAgentNorm === "REGIONAL";
-
     const transfertsEnCours = [];
 
     for (const t of transRes.rows) {
@@ -366,12 +354,13 @@ app.get("/api/stats", async (req, res) => {
         statutNorm.indexOf("TRANSFERT") !== -1;
       const etape = estEnCours ? "EN_COURS" : "DEMANDE";
 
-      const concerneAgent =
-        estSuperviseur ||
-        (agenceDemandeur && agenceDemandeur === agenceAgentNorm) ||
-        (agenceCarteNorm && agenceCarteNorm === agenceAgentNorm);
+      const concerneAgence =
+        Boolean(agenceAgentNorm) &&
+        agenceAgentNorm !== "REGIONAL" &&
+        ((agenceDemandeur && agenceDemandeur === agenceAgentNorm) ||
+          (agenceCarteNorm && agenceCarteNorm === agenceAgentNorm));
 
-      if (concerneAgent) {
+      if (concerneAgence) {
         const numSecu = formaterNumSecu(t.num_secu, t.numero);
         const rangement = (t.rangement || "Non défini").toString().trim();
         const nom = (t.nom || "").toString().trim();
@@ -471,7 +460,7 @@ app.post("/api/reacheminement/demander", async (req, res) => {
   }
 });
 
-// --- 4b. Étape 2 : Valider l'expédition ---
+// --- 4b. Étape 2 : Valider l'expédition (détenteur) ---
 app.post("/api/reacheminement/expedier", async (req, res) => {
   try {
     const idCarte = Number(req.body.ligneIndex);
@@ -503,7 +492,7 @@ app.post("/api/reacheminement/expedier", async (req, res) => {
   }
 });
 
-// --- 4c. Étape 3 : Valider la réception (rattache la carte à la nouvelle agence) ---
+// --- 4c. Étape 3 : Valider la réception (demandeur -> rattache la carte à la nouvelle agence) ---
 app.post("/api/reacheminement/recevoir", async (req, res) => {
   try {
     const idCarte = Number(req.body.ligneIndex);
