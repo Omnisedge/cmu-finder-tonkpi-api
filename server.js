@@ -28,7 +28,7 @@ function normaliserTexte(str) {
 function normaliserAgence(str) {
   const norm = normaliserTexte(str);
   if (norm === "BK" || norm === "BIANKOUMA") return "BIANKOUMA";
-  if (norm === "DAN" || norm === "DANANE" || norm === "DANANE") return "DANANE";
+  if (norm === "DAN" || norm === "DANANE") return "DANANE";
   if (norm === "MAN") return "MAN";
   if (norm === "SIP" || norm === "SIPILOU") return "SIPILOU";
   if (norm === "ZH" || norm === "ZOUAN-HOUNIEN" || norm === "ZOUAN HOUNIEN" || norm === "ZOUAN-HOUN") {
@@ -204,7 +204,7 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
-// --- 2. Recherche rapide (priorité NUM_SECU exact, puis partiel, puis historique) ---
+// --- 2. Recherche rapide (cartes actives + cartes retirées dans historique) ---
 app.get("/api/cartes/recherche", async (req, res) => {
   try {
     const raw = (req.query.q || "").toString().trim();
@@ -226,7 +226,7 @@ app.get("/api/cartes/recherche", async (req, res) => {
 
     let rowsCartes = exactRes.rows;
 
-    // 2) Complément par recherche partielle si besoin
+    // 2) Complément par recherche partielle dans cartes
     if (rowsCartes.length < limite) {
       const existingIds = rowsCartes.map((r) => r.id);
       const partRes = await pool.query(
@@ -246,65 +246,67 @@ app.get("/api/cartes/recherche", async (req, res) => {
       rowsCartes = rowsCartes.concat(partRes.rows);
     }
 
-    if (rowsCartes.length > 0) {
-      const formatted = rowsCartes.map((r) => {
-        const agence = (r.agence || "Non définie").toString().trim();
-        return {
-          ligneIndex: r.id, // Identifiant unique SQL de la carte
-          rangement: (r.rangement || "Non défini").toString().trim(),
-          numSecu: formaterNumSecu(r.num_secu, r.numero),
-          nom: (r.nom || "").toString().trim(),
-          prenoms: (r.prenoms || "").toString().trim(),
-          dateNaissance: formaterDateFR(r.date_naissance),
-          agence,
-          agenceNorm: normaliserAgence(agence),
-          lieuPrecis: (r.lieu_precis || "Non défini").toString().trim(),
-          statut: (r.statut_transfert || "DISPONIBLE").toString().trim(),
-          estRetiree: false
-        };
-      });
-      return res.json(formatted);
-    }
-
-    // 3) Repli sur l'historique uniquement si aucune carte active ne correspond
-    const histRes = await pool.query(
-      `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis,
-              retire_par, telephone_retrait, date_retrait, agence_retrait
-       FROM historique
-       WHERE LOWER(COALESCE(nom, '')) LIKE $1
-          OR LOWER(COALESCE(prenoms, '')) LIKE $1
-          OR LOWER(COALESCE(nom, '') || ' ' || COALESCE(prenoms, '')) LIKE $1
-          OR LOWER(COALESCE(num_secu, '')) LIKE $1
-          OR LOWER(COALESCE(numero, '')) LIKE $1
-       ORDER BY id DESC
-       LIMIT $2`,
-      [likeTerm, limite]
-    );
-
-    const formattedHist = histRes.rows.map((h) => {
-      const agOrig = (h.agence || "").toString().trim();
-      const agRet = (h.agence_retrait || "").toString().trim();
-      const retirePar = (h.retire_par || "Inconnu").toString().trim();
-      const dateRet = formaterDateFR(h.date_retrait);
+    const formattedActives = rowsCartes.map((r) => {
+      const agence = (r.agence || "Non définie").toString().trim();
       return {
-        ligneIndex: null,
-        rangement: (h.rangement || "Archivé").toString().trim(),
-        numSecu: formaterNumSecu(h.num_secu, h.numero),
-        nom: (h.nom || "").toString().trim(),
-        prenoms: (h.prenoms || "").toString().trim(),
-        dateNaissance: formaterDateFR(h.date_naissance),
-        agence: agOrig || agRet,
-        agenceNorm: normaliserAgence(agOrig || agRet),
-        lieuPrecis: (h.lieu_precis || "").toString().trim(),
-        statut: `Carte Retirée par ${retirePar} le ${dateRet}`,
-        retirePar,
-        dateRetrait: dateRet,
-        agenceRetrait: agRet,
-        estRetiree: true
+        ligneIndex: r.id,
+        rangement: (r.rangement || "Non défini").toString().trim(),
+        numSecu: formaterNumSecu(r.num_secu, r.numero),
+        nom: (r.nom || "").toString().trim(),
+        prenoms: (r.prenoms || "").toString().trim(),
+        dateNaissance: formaterDateFR(r.date_naissance),
+        agence,
+        agenceNorm: normaliserAgence(agence),
+        lieuPrecis: (r.lieu_precis || "Non défini").toString().trim(),
+        statut: (r.statut_transfert || "DISPONIBLE").toString().trim(),
+        estRetiree: false
       };
     });
 
-    return res.json(formattedHist);
+    // 3) Toujours inclure les cartes déjà retirées correspondantes depuis historique
+    const resteLimite = Math.max(0, limite - formattedActives.length);
+    let formattedHist = [];
+
+    if (resteLimite > 0) {
+      const histRes = await pool.query(
+        `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis,
+                retire_par, telephone_retrait, date_retrait, agence_retrait
+         FROM historique
+         WHERE LOWER(COALESCE(nom, '')) LIKE $1
+            OR LOWER(COALESCE(prenoms, '')) LIKE $1
+            OR LOWER(COALESCE(nom, '') || ' ' || COALESCE(prenoms, '')) LIKE $1
+            OR LOWER(COALESCE(num_secu, '')) LIKE $1
+            OR LOWER(COALESCE(numero, '')) LIKE $1
+         ORDER BY id DESC
+         LIMIT $2`,
+        [likeTerm, resteLimite]
+      );
+
+      formattedHist = histRes.rows.map((h) => {
+        const agOrig = (h.agence || "").toString().trim();
+        const agRet = (h.agence_retrait || "").toString().trim();
+        const retirePar = (h.retire_par || "Inconnu").toString().trim();
+        const dateRet = formaterDateFR(h.date_retrait);
+        return {
+          ligneIndex: null,
+          rangement: (h.rangement || "Archivé").toString().trim(),
+          numSecu: formaterNumSecu(h.num_secu, h.numero),
+          nom: (h.nom || "").toString().trim(),
+          prenoms: (h.prenoms || "").toString().trim(),
+          dateNaissance: formaterDateFR(h.date_naissance),
+          agence: agOrig || agRet,
+          agenceNorm: normaliserAgence(agOrig || agRet),
+          lieuPrecis: (h.lieu_precis || "").toString().trim(),
+          statut: `Carte Retirée par ${retirePar} le ${dateRet}`,
+          retirePar,
+          dateRetrait: dateRet,
+          agenceRetrait: agRet,
+          estRetiree: true
+        };
+      });
+    }
+
+    return res.json(formattedActives.concat(formattedHist));
   } catch (err) {
     res.status(500).json({ error: "Erreur recherche : " + err.message });
   }
@@ -561,7 +563,7 @@ app.post("/api/cartes/retirer", async (req, res) => {
         c.agence || "",
         c.lieu_precis || "",
         retirePar,
-        telFormate, // VARCHAR : le '0' initial est conservé intact
+        telFormate,
         dateFormatee,
         agenceRetrait
       ]
