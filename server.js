@@ -7,7 +7,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -211,7 +211,7 @@ app.get("/api/cartes/recherche", async (req, res) => {
     const terme = raw.toLowerCase();
     if (terme.length < 2) return res.json([]);
 
-    const limite = 40;
+    const limite = 60;
     const likeTerm = `%${terme}%`;
 
     // 1) Correspondance exacte sur num_secu ou numero en priorité
@@ -264,47 +264,43 @@ app.get("/api/cartes/recherche", async (req, res) => {
     });
 
     // 3) Toujours inclure les cartes déjà retirées correspondantes depuis historique
-    const resteLimite = Math.max(0, limite - formattedActives.length);
-    let formattedHist = [];
+    const resteLimite = Math.max(10, limite - formattedActives.length);
+    const histRes = await pool.query(
+      `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis,
+              retire_par, telephone_retrait, date_retrait, agence_retrait
+       FROM historique
+       WHERE LOWER(COALESCE(nom, '')) LIKE $1
+          OR LOWER(COALESCE(prenoms, '')) LIKE $1
+          OR LOWER(COALESCE(nom, '') || ' ' || COALESCE(prenoms, '')) LIKE $1
+          OR LOWER(COALESCE(num_secu, '')) LIKE $1
+          OR LOWER(COALESCE(numero, '')) LIKE $1
+       ORDER BY id DESC
+       LIMIT $2`,
+      [likeTerm, resteLimite]
+    );
 
-    if (resteLimite > 0) {
-      const histRes = await pool.query(
-        `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis,
-                retire_par, telephone_retrait, date_retrait, agence_retrait
-         FROM historique
-         WHERE LOWER(COALESCE(nom, '')) LIKE $1
-            OR LOWER(COALESCE(prenoms, '')) LIKE $1
-            OR LOWER(COALESCE(nom, '') || ' ' || COALESCE(prenoms, '')) LIKE $1
-            OR LOWER(COALESCE(num_secu, '')) LIKE $1
-            OR LOWER(COALESCE(numero, '')) LIKE $1
-         ORDER BY id DESC
-         LIMIT $2`,
-        [likeTerm, resteLimite]
-      );
-
-      formattedHist = histRes.rows.map((h) => {
-        const agOrig = (h.agence || "").toString().trim();
-        const agRet = (h.agence_retrait || "").toString().trim();
-        const retirePar = (h.retire_par || "Inconnu").toString().trim();
-        const dateRet = formaterDateFR(h.date_retrait);
-        return {
-          ligneIndex: null,
-          rangement: (h.rangement || "Archivé").toString().trim(),
-          numSecu: formaterNumSecu(h.num_secu, h.numero),
-          nom: (h.nom || "").toString().trim(),
-          prenoms: (h.prenoms || "").toString().trim(),
-          dateNaissance: formaterDateFR(h.date_naissance),
-          agence: agOrig || agRet,
-          agenceNorm: normaliserAgence(agOrig || agRet),
-          lieuPrecis: (h.lieu_precis || "").toString().trim(),
-          statut: `Carte Retirée par ${retirePar} le ${dateRet}`,
-          retirePar,
-          dateRetrait: dateRet,
-          agenceRetrait: agRet,
-          estRetiree: true
-        };
-      });
-    }
+    const formattedHist = histRes.rows.map((h) => {
+      const agOrig = (h.agence || "").toString().trim();
+      const agRet = (h.agence_retrait || "").toString().trim();
+      const retirePar = (h.retire_par || "Inconnu").toString().trim();
+      const dateRet = formaterDateFR(h.date_retrait);
+      return {
+        ligneIndex: null,
+        rangement: (h.rangement || "Archivé").toString().trim(),
+        numSecu: formaterNumSecu(h.num_secu, h.numero),
+        nom: (h.nom || "").toString().trim(),
+        prenoms: (h.prenoms || "").toString().trim(),
+        dateNaissance: formaterDateFR(h.date_naissance),
+        agence: agOrig || agRet,
+        agenceNorm: normaliserAgence(agOrig || agRet),
+        lieuPrecis: (h.lieu_precis || "").toString().trim(),
+        statut: `Carte Retirée par ${retirePar} le ${dateRet}`,
+        retirePar,
+        dateRetrait: dateRet,
+        agenceRetrait: agRet,
+        estRetiree: true
+      };
+    });
 
     return res.json(formattedActives.concat(formattedHist));
   } catch (err) {
@@ -356,6 +352,8 @@ app.get("/api/stats", async (req, res) => {
       roleNorm === "CHEF D'EQUIPE" ||
       roleNorm === "CHEF_EQUIPE" ||
       roleNorm === "CHEF EQUIPE" ||
+      roleNorm === "SUP" ||
+      roleNorm === "CE" ||
       agenceAgentNorm === "REGIONAL";
 
     const transfertsEnCours = [];
@@ -498,11 +496,29 @@ app.post("/api/reacheminement/expedier", async (req, res) => {
   }
 });
 
-// --- 4c. Étape 3 : Valider la réception ---
+// --- 4c. Étape 3 : Valider la réception (rattache la carte à l'agence destinataire) ---
 app.post("/api/reacheminement/recevoir", async (req, res) => {
   try {
     const idCarte = Number(req.body.ligneIndex);
-    const agenceFinale = normaliserAgence(req.body.nouvelleAgence);
+    const q = await pool.query(
+      `SELECT id, agence, statut_transfert FROM cartes WHERE id = $1 LIMIT 1`,
+      [idCarte]
+    );
+    if (q.rows.length === 0) {
+      return res.status(404).json({ message: "Carte introuvable." });
+    }
+
+    const demandeExtraite = extraireAgenceDemandeur(q.rows[0].statut_transfert);
+    const candidateAgence =
+      req.body.agenceDemandeur ||
+      demandeExtraite ||
+      req.body.nouvelleAgence ||
+      q.rows[0].agence;
+
+    const agenceFinale = normaliserAgence(candidateAgence);
+    if (!agenceFinale || agenceFinale === "REGIONAL") {
+      return res.status(400).json({ message: "Impossible de déterminer le département destinataire." });
+    }
 
     await pool.query(
       `UPDATE cartes SET agence = $1, statut_transfert = 'Carte réacheminée' WHERE id = $2`,
@@ -510,7 +526,8 @@ app.post("/api/reacheminement/recevoir", async (req, res) => {
     );
 
     res.json({
-      message: `Succès : Carte réceptionnée, rattachée à ${agenceFinale} et marquée 'Carte réacheminée'.`
+      message: `Succès : Carte réceptionnée, rattachée à ${agenceFinale} et marquée 'Carte réacheminée'.`,
+      nouvelleAgence: agenceFinale
     });
   } catch (err) {
     res.status(500).json({ message: "Erreur : " + err.message });
@@ -615,6 +632,99 @@ app.get("/api/historique", async (req, res) => {
     res.json(list);
   } catch (err) {
     res.status(500).json({ error: "Erreur historique : " + err.message });
+  }
+});
+
+// --- 7. Import massif de cartes depuis CSV (SUP / CE uniquement) ---
+app.post("/api/cartes/import", async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const roleNorm = normaliserTexte(req.body.role || "");
+    const agenceNorm = normaliserAgence(req.body.agence || "");
+    const estAutorise =
+      roleNorm === "SUPERVISEUR" ||
+      roleNorm === "PATRON" ||
+      roleNorm === "CHEF D'EQUIPE" ||
+      roleNorm === "CHEF_EQUIPE" ||
+      roleNorm === "CHEF EQUIPE" ||
+      roleNorm === "SUP" ||
+      roleNorm === "CE" ||
+      agenceNorm === "REGIONAL";
+
+    if (!estAutorise) {
+      return res.status(403).json({ message: "Accès réservé aux profils SUP et CE." });
+    }
+
+    const lignes = Array.isArray(req.body.cartes) ? req.body.cartes : [];
+    if (lignes.length === 0) {
+      return res.status(400).json({ message: "Aucune ligne valide trouvée dans le fichier." });
+    }
+    if (lignes.length > 5000) {
+      return res.status(400).json({ message: "Limite de 5 000 lignes par import dépassée." });
+    }
+
+    let inserees = 0;
+    let misesAJour = 0;
+
+    await client.query("BEGIN");
+
+    for (const item of lignes) {
+      const rangement = (item.rangement || "").toString().trim();
+      const numSecu = (item.num_secu || item.numSecu || "").toString().trim();
+      const nom = (item.nom || "").toString().trim();
+      const prenoms = (item.prenoms || "").toString().trim();
+      const dateNaissance = (item.date_naissance || item.dateNaissance || "").toString().trim();
+      const numero = (item.numero || "").toString().trim();
+      const agence = normaliserAgence(item.agence || "") || (item.agence || "").toString().trim();
+      const lieuPrecis = (item.lieu_precis || item.lieuPrecis || "").toString().trim();
+      const statutTransfert =
+        (item.statut_transfert || item.statut || "DISPONIBLE").toString().trim() || "DISPONIBLE";
+
+      if (!nom && !prenoms && !numSecu && !numero) continue;
+
+      if (numSecu) {
+        const exist = await client.query(
+          `SELECT id FROM cartes WHERE TRIM(num_secu) = $1 LIMIT 1`,
+          [numSecu]
+        );
+        if (exist.rows.length > 0) {
+          await client.query(
+            `UPDATE cartes
+             SET rangement = COALESCE(NULLIF($1, ''), rangement),
+                 nom = COALESCE(NULLIF($2, ''), nom),
+                 prenoms = COALESCE(NULLIF($3, ''), prenoms),
+                 date_naissance = COALESCE(NULLIF($4, ''), date_naissance),
+                 numero = COALESCE(NULLIF($5, ''), numero),
+                 agence = COALESCE(NULLIF($6, ''), agence),
+                 lieu_precis = COALESCE(NULLIF($7, ''), lieu_precis),
+                 statut_transfert = COALESCE(NULLIF($8, ''), statut_transfert)
+             WHERE id = $9`,
+            [rangement, nom, prenoms, dateNaissance, numero, agence, lieuPrecis, statutTransfert, exist.rows[0].id]
+          );
+          misesAJour++;
+          continue;
+        }
+      }
+
+      await client.query(
+        `INSERT INTO cartes (
+          rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis, statut_transfert
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [rangement, numSecu, nom, prenoms, dateNaissance, numero, agence, lieuPrecis, statutTransfert]
+      );
+      inserees++;
+    }
+
+    await client.query("COMMIT");
+
+    res.json({
+      message: `Import terminé : ${inserees} carte(s) ajoutée(s), ${misesAJour} mise(s) à jour.`
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    res.status(500).json({ message: "Erreur lors de l'import : " + err.message });
+  } finally {
+    client.release();
   }
 });
 
