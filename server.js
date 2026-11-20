@@ -214,7 +214,6 @@ app.get("/api/cartes/recherche", async (req, res) => {
     const limite = 60;
     const likeTerm = `%${terme}%`;
 
-    // 1) Correspondance exacte sur num_secu ou numero en priorité
     const exactRes = await pool.query(
       `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis, statut_transfert
        FROM cartes
@@ -226,7 +225,6 @@ app.get("/api/cartes/recherche", async (req, res) => {
 
     let rowsCartes = exactRes.rows;
 
-    // 2) Complément par recherche partielle dans cartes
     if (rowsCartes.length < limite) {
       const existingIds = rowsCartes.map((r) => r.id);
       const partRes = await pool.query(
@@ -263,7 +261,6 @@ app.get("/api/cartes/recherche", async (req, res) => {
       };
     });
 
-    // 3) Toujours inclure les cartes déjà retirées correspondantes depuis historique
     const resteLimite = Math.max(10, limite - formattedActives.length);
     const histRes = await pool.query(
       `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis,
@@ -478,25 +475,35 @@ app.post("/api/reacheminement/demander", async (req, res) => {
 app.post("/api/reacheminement/expedier", async (req, res) => {
   try {
     const idCarte = Number(req.body.ligneIndex);
-    const q = await pool.query(`SELECT statut_transfert FROM cartes WHERE id = $1 LIMIT 1`, [idCarte]);
+    const q = await pool.query(
+      `SELECT id, agence, statut_transfert FROM cartes WHERE id = $1 LIMIT 1`,
+      [idCarte]
+    );
     if (q.rows.length === 0) {
       return res.status(404).json({ message: "Carte introuvable." });
     }
 
-    const cible = req.body.agenceDemandeurCible
-      ? normaliserAgence(req.body.agenceDemandeurCible)
-      : extraireAgenceDemandeur(q.rows[0].statut_transfert);
+    const cibleBrute =
+      req.body.agenceDemandeurCible || extraireAgenceDemandeur(q.rows[0].statut_transfert);
+    const cible = normaliserAgence(cibleBrute);
+    if (!cible || cible === "REGIONAL") {
+      return res.status(400).json({ message: "Agence demanderesse introuvable pour ce réacheminement." });
+    }
 
     const nouveauStatut = `Réacheminement en cours vers ${cible}`;
     await pool.query(`UPDATE cartes SET statut_transfert = $1 WHERE id = $2`, [nouveauStatut, idCarte]);
 
-    res.json({ message: `Statut mis à jour : ${nouveauStatut}.` });
+    res.json({
+      success: true,
+      message: `Statut mis à jour : ${nouveauStatut}.`,
+      agenceDemandeur: cible
+    });
   } catch (err) {
     res.status(500).json({ message: "Erreur : " + err.message });
   }
 });
 
-// --- 4c. Étape 3 : Valider la réception (rattache la carte à l'agence destinataire) ---
+// --- 4c. Étape 3 : Valider la réception (rattache la carte à la nouvelle agence) ---
 app.post("/api/reacheminement/recevoir", async (req, res) => {
   try {
     const idCarte = Number(req.body.ligneIndex);
@@ -512,8 +519,7 @@ app.post("/api/reacheminement/recevoir", async (req, res) => {
     const candidateAgence =
       req.body.agenceDemandeur ||
       demandeExtraite ||
-      req.body.nouvelleAgence ||
-      q.rows[0].agence;
+      req.body.nouvelleAgence;
 
     const agenceFinale = normaliserAgence(candidateAgence);
     if (!agenceFinale || agenceFinale === "REGIONAL") {
@@ -526,6 +532,7 @@ app.post("/api/reacheminement/recevoir", async (req, res) => {
     );
 
     res.json({
+      success: true,
       message: `Succès : Carte réceptionnée, rattachée à ${agenceFinale} et marquée 'Carte réacheminée'.`,
       nouvelleAgence: agenceFinale
     });
