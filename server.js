@@ -82,18 +82,14 @@ function formaterDateFR(val) {
   return val.toString().trim();
 }
 
+// Retranscription exacte de extraireAgenceDemandeur du .gs
 function extraireAgenceDemandeur(statutStr) {
   if (!statutStr) return "";
   const up = normaliserTexte(statutStr);
-  const matchVers = up.match(/\bVERS\s+([A-Z-]+(?:\s+HOUNIEN)?)/);
-  if (matchVers && matchVers[1]) {
-    const cand = normaliserAgence(matchVers[1]);
-    if (cand && cand !== "REGIONAL") return cand;
-  }
-
   const depts = ["ZOUAN-HOUNIEN", "BIANKOUMA", "DANANE", "SIPILOU", "MAN", "ZH", "BK", "DAN", "SIP"];
   for (let i = 0; i < depts.length; i++) {
-    if (up.indexOf("VERS " + depts[i]) !== -1) {
+    const idx = up.indexOf("VERS " + depts[i]);
+    if (idx !== -1) {
       return normaliserAgence(depts[i]);
     }
   }
@@ -121,7 +117,7 @@ async function trouverContactWhatsappAgence(agenceCible) {
 
 // --- Route de santé ---
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true, service: "CMU FINDER TONKPI API", version: "2.3" });
+  res.json({ ok: true, service: "CMU FINDER TONKPI API", version: "2.4" });
 });
 
 // --- 1. Connexion (3 tentatives + suspension) ---
@@ -424,15 +420,11 @@ app.get("/api/stats", async (req, res) => {
   }
 });
 
-// --- 4a. Étape 1 : Demander un réacheminement ---
+// --- 4a. Étape 1 : Demander un réacheminement (calqué sur demanderReacheminement du .gs) ---
 app.post("/api/reacheminement/demander", async (req, res) => {
   try {
     const idCarte = Number(req.body.ligneIndex);
     const demandeurNorm = normaliserAgence(req.body.agenceDemandeur);
-
-    if (!idCarte || !demandeurNorm || demandeurNorm === "REGIONAL") {
-      return res.json({ success: false, message: "Paramètres de demande invalides." });
-    }
 
     const q = await pool.query(
       `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence
@@ -444,79 +436,88 @@ app.post("/api/reacheminement/demander", async (req, res) => {
     }
 
     const carte = q.rows[0];
-    const agenceDetentrice = (carte.agence || "").toString().trim();
-    const nouveauStatut = `DEMANDE DE REACHEMINEMENT VERS ${demandeurNorm} (DEPUIS ${normaliserAgence(agenceDetentrice)})`;
+    const rangement = carte.rangement || "Non défini";
+    const numSecu = formaterNumSecu(carte.num_secu, carte.numero);
+    const nom = carte.nom || "";
+    const prenoms = carte.prenoms || "";
+    const dateNais = formaterDateFR(carte.date_naissance);
+    const agenceDetentrice = carte.agence ? carte.agence.toString().trim() : "";
+
+    const nouveauStatut =
+      "DEMANDE DE REACHEMINEMENT VERS " +
+      demandeurNorm +
+      " (DEPUIS " +
+      normaliserAgence(agenceDetentrice) +
+      ")";
 
     await pool.query(`UPDATE cartes SET statut_transfert = $1 WHERE id = $2`, [
       nouveauStatut,
       idCarte
     ]);
 
-    const numSecu = formaterNumSecu(carte.num_secu, carte.numero);
-    const rangement = (carte.rangement || "Non défini").toString().trim();
-    const nom = (carte.nom || "").toString().trim();
-    const prenoms = (carte.prenoms || "").toString().trim();
-    const dateNais = formaterDateFR(carte.date_naissance);
-
     const telDestinataire = await trouverContactWhatsappAgence(agenceDetentrice);
     const messageWhatsapp =
-      `Bonjour cher responsable (${agenceDetentrice}),\n` +
-      `Une demande de réacheminement a été émise par l'agence de ${demandeurNorm} pour la carte CMU suivante :\n` +
-      `- N° Sécu : ${numSecu}\n` +
-      `- Rangement : ${rangement}\n` +
-      `- Nom & Prénoms : ${nom} ${prenoms}\n` +
-      `- Date de naissance : ${dateNais || "Non renseignée"}\n` +
-      `Merci de procéder au transfert et de valider l'envoi dans CMU FINDER TONKPI.`;
+      "Bonjour cher responsable (" +
+      agenceDetentrice +
+      "),\n" +
+      "Une demande de réacheminement a été émise par l'agence de " +
+      demandeurNorm +
+      " pour la carte CMU suivante :\n" +
+      "- N° Sécu : " +
+      numSecu +
+      "\n" +
+      "- Rangement : " +
+      rangement +
+      "\n" +
+      "- Nom & Prénoms : " +
+      nom +
+      " " +
+      prenoms +
+      "\n" +
+      "- Date de naissance : " +
+      (dateNais || "Non renseignée") +
+      "\n" +
+      "Merci de procéder au transfert et de valider l'envoi dans CMU FINDER TONKPI.";
 
     const lienWhatsapp = telDestinataire
-      ? `https://wa.me/${telDestinataire}?text=${encodeURIComponent(messageWhatsapp)}`
-      : `https://wa.me/?text=${encodeURIComponent(messageWhatsapp)}`;
+      ? "https://wa.me/" + telDestinataire + "?text=" + encodeURIComponent(messageWhatsapp)
+      : "https://wa.me/?text=" + encodeURIComponent(messageWhatsapp);
 
     res.json({
       success: true,
-      message: `Demande de réacheminement enregistrée vers ${demandeurNorm}.`,
-      lienWhatsapp,
-      messageWhatsapp
+      message: "Demande de réacheminement enregistrée vers " + demandeurNorm + ".",
+      lienWhatsapp: lienWhatsapp,
+      messageWhatsapp: messageWhatsapp
     });
   } catch (err) {
     res.status(500).json({ success: false, message: "Erreur : " + err.message });
   }
 });
 
-// --- 4b. Étape 2 : Valider l'expédition (détenteur) ---
+// --- 4b. Étape 2 : Valider l'expédition (calqué sur validerExpeditionReacheminement du .gs) ---
 app.post("/api/reacheminement/expedier", async (req, res) => {
   try {
     const idCarte = Number(req.body.ligneIndex);
-    if (!idCarte) {
-      return res.status(400).json({ message: "Identifiant de carte manquant." });
-    }
-
-    const q = await pool.query(
-      `SELECT id, agence, statut_transfert FROM cartes WHERE id = $1 LIMIT 1`,
-      [idCarte]
-    );
+    const q = await pool.query(`SELECT statut_transfert FROM cartes WHERE id = $1 LIMIT 1`, [
+      idCarte
+    ]);
     if (q.rows.length === 0) {
       return res.status(404).json({ message: "Carte introuvable." });
     }
 
-    const cibleBrute =
-      req.body.agenceDemandeurCible || extraireAgenceDemandeur(q.rows[0].statut_transfert);
-    const cible = normaliserAgence(cibleBrute);
-    if (!cible || cible === "REGIONAL") {
-      return res
-        .status(400)
-        .json({ message: "Agence demanderesse introuvable pour ce réacheminement." });
-    }
+    const statutActuel = (q.rows[0].statut_transfert || "").toString();
+    const cible = req.body.agenceDemandeurCible
+      ? normaliserAgence(req.body.agenceDemandeurCible)
+      : extraireAgenceDemandeur(statutActuel);
 
-    const nouveauStatut = `Réacheminement en cours vers ${cible}`;
     await pool.query(`UPDATE cartes SET statut_transfert = $1 WHERE id = $2`, [
-      nouveauStatut,
+      "Réacheminement en cours vers " + cible,
       idCarte
     ]);
 
     res.json({
       success: true,
-      message: `Statut mis à jour : ${nouveauStatut}.`,
+      message: "Statut mis à jour : Réacheminement en cours vers " + cible + ".",
       agenceDemandeur: cible
     });
   } catch (err) {
@@ -524,14 +525,10 @@ app.post("/api/reacheminement/expedier", async (req, res) => {
   }
 });
 
-// --- 4c. Étape 3 : Confirmer la réception (demandeur -> rattache la carte à la nouvelle agence) ---
+// --- 4c. Étape 3 : Valider la réception (calqué sur validerReceptionReacheminement du .gs) ---
 app.post("/api/reacheminement/recevoir", async (req, res) => {
   try {
     const idCarte = Number(req.body.ligneIndex);
-    if (!idCarte) {
-      return res.status(400).json({ message: "Identifiant de carte manquant." });
-    }
-
     const q = await pool.query(
       `SELECT id, agence, statut_transfert FROM cartes WHERE id = $1 LIMIT 1`,
       [idCarte]
@@ -541,32 +538,28 @@ app.post("/api/reacheminement/recevoir", async (req, res) => {
     }
 
     const demandeExtraite = extraireAgenceDemandeur(q.rows[0].statut_transfert);
-    const candidateAgence =
-      req.body.agenceDemandeur ||
-      demandeExtraite ||
-      req.body.nouvelleAgence;
+    const nouvelleAgenceBrute =
+      req.body.nouvelleAgence || req.body.agenceDemandeur || demandeExtraite;
+    const agenceFinale = normaliserAgence(nouvelleAgenceBrute);
 
-    const agenceFinale = normaliserAgence(candidateAgence);
     if (!agenceFinale || agenceFinale === "REGIONAL") {
       return res
         .status(400)
-        .json({ message: "Impossible de déterminer le département destinataire." });
+        .json({ message: "Impossible de déterminer l'agence destinataire." });
     }
 
-    const updated = await pool.query(
-      `UPDATE cartes
-       SET agence = $1,
-           statut_transfert = 'Carte réacheminée'
-       WHERE id = $2
-       RETURNING id, agence, statut_transfert`,
+    await pool.query(
+      `UPDATE cartes SET agence = $1, statut_transfert = 'Carte réacheminée' WHERE id = $2`,
       [agenceFinale, idCarte]
     );
 
     res.json({
       success: true,
-      message: `Succès : Carte réceptionnée, rattachée à ${agenceFinale} et marquée 'Carte réacheminée'.`,
-      nouvelleAgence: agenceFinale,
-      carte: updated.rows[0]
+      message:
+        "Succès : Carte réceptionnée, rattachée à " +
+        agenceFinale +
+        " et marquée 'Carte réacheminée'.",
+      nouvelleAgence: agenceFinale
     });
   } catch (err) {
     res.status(500).json({ message: "Erreur : " + err.message });
