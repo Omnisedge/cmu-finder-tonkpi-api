@@ -27,11 +27,17 @@ function normaliserTexte(str) {
 
 function normaliserAgence(str) {
   const norm = normaliserTexte(str);
+  if (!norm) return "";
   if (norm === "BK" || norm === "BIANKOUMA") return "BIANKOUMA";
   if (norm === "DAN" || norm === "DANANE") return "DANANE";
   if (norm === "MAN") return "MAN";
   if (norm === "SIP" || norm === "SIPILOU") return "SIPILOU";
-  if (norm === "ZH" || norm === "ZOUAN-HOUNIEN" || norm === "ZOUAN HOUNIEN" || norm === "ZOUAN-HOUN") {
+  if (
+    norm === "ZH" ||
+    norm === "ZOUAN-HOUNIEN" ||
+    norm === "ZOUAN HOUNIEN" ||
+    norm === "ZOUAN-HOUN"
+  ) {
     return "ZOUAN-HOUNIEN";
   }
   if (norm === "REGIONAL" || norm === "TONKPI" || norm === "SUP" || norm === "CE") {
@@ -79,6 +85,12 @@ function formaterDateFR(val) {
 function extraireAgenceDemandeur(statutStr) {
   if (!statutStr) return "";
   const up = normaliserTexte(statutStr);
+  const matchVers = up.match(/\bVERS\s+([A-Z-]+(?:\s+HOUNIEN)?)/);
+  if (matchVers && matchVers[1]) {
+    const cand = normaliserAgence(matchVers[1]);
+    if (cand && cand !== "REGIONAL") return cand;
+  }
+
   const depts = ["ZOUAN-HOUNIEN", "BIANKOUMA", "DANANE", "SIPILOU", "MAN", "ZH", "BK", "DAN", "SIP"];
   for (let i = 0; i < depts.length; i++) {
     if (up.indexOf("VERS " + depts[i]) !== -1) {
@@ -109,7 +121,7 @@ async function trouverContactWhatsappAgence(agenceCible) {
 
 // --- Route de santé ---
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true, service: "CMU FINDER TONKPI API" });
+  res.json({ ok: true, service: "CMU FINDER TONKPI API", version: "2.3" });
 });
 
 // --- 1. Connexion (3 tentatives + suspension) ---
@@ -153,7 +165,8 @@ app.post("/api/login", async (req, res) => {
         success: false,
         suspendu: true,
         tentativesRestantes: 0,
-        message: "Compte suspendu après 3 tentatives infructueuses. Veuillez contacter le support pour débloquer le compte."
+        message:
+          "Compte suspendu après 3 tentatives infructueuses. Veuillez contacter le support pour débloquer le compte."
       });
     }
 
@@ -179,12 +192,15 @@ app.post("/api/login", async (req, res) => {
     echecsActuels++;
 
     if (echecsActuels >= 3) {
-      await pool.query(`UPDATE utilisateurs SET tentatives_suspension = 'SUSPENDU' WHERE id = $1`, [user.id]);
+      await pool.query(`UPDATE utilisateurs SET tentatives_suspension = 'SUSPENDU' WHERE id = $1`, [
+        user.id
+      ]);
       return res.json({
         success: false,
         suspendu: true,
         tentativesRestantes: 0,
-        message: "Mot de passe incorrect. Tentatives restantes : 0. Compte suspendu, contactez le support."
+        message:
+          "Mot de passe incorrect. Tentatives restantes : 0. Compte suspendu, contactez le support."
       });
     } else {
       await pool.query(`UPDATE utilisateurs SET tentatives_suspension = $1 WHERE id = $2`, [
@@ -414,6 +430,10 @@ app.post("/api/reacheminement/demander", async (req, res) => {
     const idCarte = Number(req.body.ligneIndex);
     const demandeurNorm = normaliserAgence(req.body.agenceDemandeur);
 
+    if (!idCarte || !demandeurNorm || demandeurNorm === "REGIONAL") {
+      return res.json({ success: false, message: "Paramètres de demande invalides." });
+    }
+
     const q = await pool.query(
       `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence
        FROM cartes WHERE id = $1 LIMIT 1`,
@@ -427,7 +447,10 @@ app.post("/api/reacheminement/demander", async (req, res) => {
     const agenceDetentrice = (carte.agence || "").toString().trim();
     const nouveauStatut = `DEMANDE DE REACHEMINEMENT VERS ${demandeurNorm} (DEPUIS ${normaliserAgence(agenceDetentrice)})`;
 
-    await pool.query(`UPDATE cartes SET statut_transfert = $1 WHERE id = $2`, [nouveauStatut, idCarte]);
+    await pool.query(`UPDATE cartes SET statut_transfert = $1 WHERE id = $2`, [
+      nouveauStatut,
+      idCarte
+    ]);
 
     const numSecu = formaterNumSecu(carte.num_secu, carte.numero);
     const rangement = (carte.rangement || "Non défini").toString().trim();
@@ -464,6 +487,10 @@ app.post("/api/reacheminement/demander", async (req, res) => {
 app.post("/api/reacheminement/expedier", async (req, res) => {
   try {
     const idCarte = Number(req.body.ligneIndex);
+    if (!idCarte) {
+      return res.status(400).json({ message: "Identifiant de carte manquant." });
+    }
+
     const q = await pool.query(
       `SELECT id, agence, statut_transfert FROM cartes WHERE id = $1 LIMIT 1`,
       [idCarte]
@@ -476,11 +503,16 @@ app.post("/api/reacheminement/expedier", async (req, res) => {
       req.body.agenceDemandeurCible || extraireAgenceDemandeur(q.rows[0].statut_transfert);
     const cible = normaliserAgence(cibleBrute);
     if (!cible || cible === "REGIONAL") {
-      return res.status(400).json({ message: "Agence demanderesse introuvable pour ce réacheminement." });
+      return res
+        .status(400)
+        .json({ message: "Agence demanderesse introuvable pour ce réacheminement." });
     }
 
     const nouveauStatut = `Réacheminement en cours vers ${cible}`;
-    await pool.query(`UPDATE cartes SET statut_transfert = $1 WHERE id = $2`, [nouveauStatut, idCarte]);
+    await pool.query(`UPDATE cartes SET statut_transfert = $1 WHERE id = $2`, [
+      nouveauStatut,
+      idCarte
+    ]);
 
     res.json({
       success: true,
@@ -492,10 +524,14 @@ app.post("/api/reacheminement/expedier", async (req, res) => {
   }
 });
 
-// --- 4c. Étape 3 : Valider la réception (demandeur -> rattache la carte à la nouvelle agence) ---
+// --- 4c. Étape 3 : Confirmer la réception (demandeur -> rattache la carte à la nouvelle agence) ---
 app.post("/api/reacheminement/recevoir", async (req, res) => {
   try {
     const idCarte = Number(req.body.ligneIndex);
+    if (!idCarte) {
+      return res.status(400).json({ message: "Identifiant de carte manquant." });
+    }
+
     const q = await pool.query(
       `SELECT id, agence, statut_transfert FROM cartes WHERE id = $1 LIMIT 1`,
       [idCarte]
@@ -512,18 +548,25 @@ app.post("/api/reacheminement/recevoir", async (req, res) => {
 
     const agenceFinale = normaliserAgence(candidateAgence);
     if (!agenceFinale || agenceFinale === "REGIONAL") {
-      return res.status(400).json({ message: "Impossible de déterminer le département destinataire." });
+      return res
+        .status(400)
+        .json({ message: "Impossible de déterminer le département destinataire." });
     }
 
-    await pool.query(
-      `UPDATE cartes SET agence = $1, statut_transfert = 'Carte réacheminée' WHERE id = $2`,
+    const updated = await pool.query(
+      `UPDATE cartes
+       SET agence = $1,
+           statut_transfert = 'Carte réacheminée'
+       WHERE id = $2
+       RETURNING id, agence, statut_transfert`,
       [agenceFinale, idCarte]
     );
 
     res.json({
       success: true,
       message: `Succès : Carte réceptionnée, rattachée à ${agenceFinale} et marquée 'Carte réacheminée'.`,
-      nouvelleAgence: agenceFinale
+      nouvelleAgence: agenceFinale,
+      carte: updated.rows[0]
     });
   } catch (err) {
     res.status(500).json({ message: "Erreur : " + err.message });
@@ -540,7 +583,9 @@ app.post("/api/cartes/retirer", async (req, res) => {
     const agenceRetrait = normaliserAgence(req.body.agenceAgent);
 
     if (!retirePar || !/^\d{10}$/.test(telFormate)) {
-      return res.status(400).json({ message: "Nom/prénoms ou contact à 10 chiffres invalide." });
+      return res
+        .status(400)
+        .json({ message: "Nom/prénoms ou contact à 10 chiffres invalide." });
     }
 
     await client.query("BEGIN");
@@ -695,7 +740,17 @@ app.post("/api/cartes/import", async (req, res) => {
                  lieu_precis = COALESCE(NULLIF($7, ''), lieu_precis),
                  statut_transfert = COALESCE(NULLIF($8, ''), statut_transfert)
              WHERE id = $9`,
-            [rangement, nom, prenoms, dateNaissance, numero, agence, lieuPrecis, statutTransfert, exist.rows[0].id]
+            [
+              rangement,
+              nom,
+              prenoms,
+              dateNaissance,
+              numero,
+              agence,
+              lieuPrecis,
+              statutTransfert,
+              exist.rows[0].id
+            ]
           );
           misesAJour++;
           continue;
@@ -706,7 +761,17 @@ app.post("/api/cartes/import", async (req, res) => {
         `INSERT INTO cartes (
           rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis, statut_transfert
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-        [rangement, numSecu, nom, prenoms, dateNaissance, numero, agence, lieuPrecis, statutTransfert]
+        [
+          rangement,
+          numSecu,
+          nom,
+          prenoms,
+          dateNaissance,
+          numero,
+          agence,
+          lieuPrecis,
+          statutTransfert
+        ]
       );
       inserees++;
     }
