@@ -121,7 +121,7 @@ async function trouverContactWhatsappAgence(agenceCible) {
 
 // --- Route de santé ---
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true, service: "CMU FINDER TONKPI API", version: "2.5" });
+  res.json({ ok: true, service: "CMU FINDER TONKPI API", version: "2.6" });
 });
 
 // --- 1. Connexion (3 tentatives + suspension) ---
@@ -498,13 +498,14 @@ app.post("/api/reacheminement/demander", async (req, res) => {
   }
 });
 
-// --- 4b. Étape 2 : Valider l'expédition ---
+// --- 4b. Validation de l'envoi -> bascule directement vers l'agence demanderesse en 'Carte réacheminée' ---
 app.post("/api/reacheminement/expedier", async (req, res) => {
   try {
     const idCarte = Number(req.body.ligneIndex);
-    const q = await pool.query(`SELECT statut_transfert FROM cartes WHERE id = $1 LIMIT 1`, [
-      idCarte
-    ]);
+    const q = await pool.query(
+      `SELECT id, agence, statut_transfert FROM cartes WHERE id = $1 LIMIT 1`,
+      [idCarte]
+    );
     if (q.rows.length === 0) {
       return res.status(404).json({ message: "Carte introuvable." });
     }
@@ -520,22 +521,23 @@ app.post("/api/reacheminement/expedier", async (req, res) => {
         .json({ message: "Agence demanderesse introuvable pour ce réacheminement." });
     }
 
-    await pool.query(`UPDATE cartes SET statut_transfert = $1 WHERE id = $2`, [
-      "Réacheminement en cours vers " + cible,
-      idCarte
-    ]);
+    await pool.query(
+      `UPDATE cartes SET agence = $1, statut_transfert = 'Carte réacheminée' WHERE id = $2`,
+      [cible, idCarte]
+    );
 
     res.json({
       success: true,
-      message: "Statut mis à jour : Réacheminement en cours vers " + cible + ".",
-      agenceDemandeur: cible
+      message:
+        "Succès : Carte transférée vers " + cible + " et marquée 'Carte réacheminée'.",
+      nouvelleAgence: cible
     });
   } catch (err) {
     res.status(500).json({ message: "Erreur : " + err.message });
   }
 });
 
-// --- 4c. Étape 3 : Valider la réception ---
+// --- 4c. Confirmation de réception (conserve la compatibilité si appelée) ---
 app.post("/api/reacheminement/recevoir", async (req, res) => {
   try {
     const idCarte = Number(req.body.ligneIndex);
