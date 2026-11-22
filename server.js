@@ -82,7 +82,6 @@ function formaterDateFR(val) {
   return val.toString().trim();
 }
 
-// Retranscription exacte de extraireAgenceDemandeur du .gs
 function extraireAgenceDemandeur(statutStr) {
   if (!statutStr) return "";
   const up = normaliserTexte(statutStr);
@@ -92,6 +91,11 @@ function extraireAgenceDemandeur(statutStr) {
     if (idx !== -1) {
       return normaliserAgence(depts[i]);
     }
+  }
+  const matchVers = up.match(/\bVERS\s+([A-Z0-9-]+(?:\s+HOUNIEN)?)/);
+  if (matchVers && matchVers[1]) {
+    const cand = normaliserAgence(matchVers[1].trim());
+    if (cand && cand !== "REGIONAL") return cand;
   }
   for (let j = 0; j < depts.length; j++) {
     if (up.indexOf(depts[j]) !== -1) {
@@ -117,7 +121,7 @@ async function trouverContactWhatsappAgence(agenceCible) {
 
 // --- Route de santé ---
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true, service: "CMU FINDER TONKPI API", version: "2.4" });
+  res.json({ ok: true, service: "CMU FINDER TONKPI API", version: "2.5" });
 });
 
 // --- 1. Connexion (3 tentatives + suspension) ---
@@ -420,7 +424,7 @@ app.get("/api/stats", async (req, res) => {
   }
 });
 
-// --- 4a. Étape 1 : Demander un réacheminement (calqué sur demanderReacheminement du .gs) ---
+// --- 4a. Étape 1 : Demander un réacheminement ---
 app.post("/api/reacheminement/demander", async (req, res) => {
   try {
     const idCarte = Number(req.body.ligneIndex);
@@ -494,7 +498,7 @@ app.post("/api/reacheminement/demander", async (req, res) => {
   }
 });
 
-// --- 4b. Étape 2 : Valider l'expédition (calqué sur validerExpeditionReacheminement du .gs) ---
+// --- 4b. Étape 2 : Valider l'expédition ---
 app.post("/api/reacheminement/expedier", async (req, res) => {
   try {
     const idCarte = Number(req.body.ligneIndex);
@@ -509,6 +513,12 @@ app.post("/api/reacheminement/expedier", async (req, res) => {
     const cible = req.body.agenceDemandeurCible
       ? normaliserAgence(req.body.agenceDemandeurCible)
       : extraireAgenceDemandeur(statutActuel);
+
+    if (!cible || cible === "REGIONAL") {
+      return res
+        .status(400)
+        .json({ message: "Agence demanderesse introuvable pour ce réacheminement." });
+    }
 
     await pool.query(`UPDATE cartes SET statut_transfert = $1 WHERE id = $2`, [
       "Réacheminement en cours vers " + cible,
@@ -525,7 +535,7 @@ app.post("/api/reacheminement/expedier", async (req, res) => {
   }
 });
 
-// --- 4c. Étape 3 : Valider la réception (calqué sur validerReceptionReacheminement du .gs) ---
+// --- 4c. Étape 3 : Valider la réception ---
 app.post("/api/reacheminement/recevoir", async (req, res) => {
   try {
     const idCarte = Number(req.body.ligneIndex);
