@@ -7,7 +7,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "15mb" }));
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -119,12 +119,35 @@ async function trouverContactWhatsappAgence(agenceCible) {
   return "";
 }
 
+function estSuperviseurOuCe(role, agence) {
+  const roleNorm = normaliserTexte(role || "");
+  const agenceNorm = normaliserAgence(agence || "");
+  return (
+    roleNorm === "SUPERVISEUR" ||
+    roleNorm === "PATRON" ||
+    roleNorm === "CHEF D'EQUIPE" ||
+    roleNorm === "CHEF_EQUIPE" ||
+    roleNorm === "CHEF EQUIPE" ||
+    roleNorm === "SUP" ||
+    roleNorm === "CE" ||
+    agenceNorm === "REGIONAL"
+  );
+}
+
+function echapperCsv(val) {
+  const s = val === null || val === undefined ? "" : String(val);
+  if (/[",\r\n]/.test(s)) {
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+  return s;
+}
+
 // --- Route de santé ---
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true, service: "CMU FINDER TONKPI API", version: "2.6" });
+  res.json({ ok: true, service: "CMU FINDER TONKPI API", version: "2.9-TERRAIN" });
 });
 
-// --- 1. Connexion (3 tentatives + suspension) ---
+// --- 1. Connexion (sans blocage après tentatives incorrectes) ---
 app.post("/api/login", async (req, res) => {
   try {
     const idRecherche = req.body.identifiant ? normaliserTexte(req.body.identifiant) : "";
@@ -133,6 +156,7 @@ app.post("/api/login", async (req, res) => {
     if (!idRecherche || !passRecherche) {
       return res.json({
         success: false,
+        suspendu: false,
         message: "Veuillez saisir votre identifiant et votre mot de passe."
       });
     }
@@ -160,16 +184,6 @@ app.post("/api/login", async (req, res) => {
     const dbPass = (user.mot_de_passe || "").toString().trim();
     const dbRole = user.role ? normaliserTexte(user.role) : "AGENT";
 
-    if (etatSecu === "SUSPENDU") {
-      return res.json({
-        success: false,
-        suspendu: true,
-        tentativesRestantes: 0,
-        message:
-          "Compte suspendu après 3 tentatives infructueuses. Veuillez contacter le support pour débloquer le compte."
-      });
-    }
-
     if (dbPass === passRecherche) {
       if (etatSecu !== "") {
         await pool.query(`UPDATE utilisateurs SET tentatives_suspension = '' WHERE id = $1`, [user.id]);
@@ -177,6 +191,7 @@ app.post("/api/login", async (req, res) => {
       const agenceEffective = dbAgence || normaliserAgence(user.identifiant);
       return res.json({
         success: true,
+        identifiant: (user.identifiant || idRecherche).toString().trim().toUpperCase(),
         nomComplet: dbNom || user.identifiant,
         agence: agenceEffective,
         agenceNorm: normaliserAgence(agenceEffective),
@@ -185,36 +200,11 @@ app.post("/api/login", async (req, res) => {
       });
     }
 
-    let echecsActuels = 0;
-    if (etatSecu.indexOf("ECHEC_") === 0) {
-      echecsActuels = parseInt(etatSecu.replace("ECHEC_", ""), 10) || 0;
-    }
-    echecsActuels++;
-
-    if (echecsActuels >= 3) {
-      await pool.query(`UPDATE utilisateurs SET tentatives_suspension = 'SUSPENDU' WHERE id = $1`, [
-        user.id
-      ]);
-      return res.json({
-        success: false,
-        suspendu: true,
-        tentativesRestantes: 0,
-        message:
-          "Mot de passe incorrect. Tentatives restantes : 0. Compte suspendu, contactez le support."
-      });
-    } else {
-      await pool.query(`UPDATE utilisateurs SET tentatives_suspension = $1 WHERE id = $2`, [
-        "ECHEC_" + echecsActuels,
-        user.id
-      ]);
-      const restantes = 3 - echecsActuels;
-      return res.json({
-        success: false,
-        suspendu: false,
-        tentativesRestantes: restantes,
-        message: `Mot de passe incorrect. Tentative(s) restante(s) : ${restantes} sur 3.`
-      });
-    }
+    return res.json({
+      success: false,
+      suspendu: false,
+      message: "Identifiant ou mot de passe incorrect."
+    });
   } catch (err) {
     res.status(500).json({ success: false, message: "Erreur serveur : " + err.message });
   }
@@ -321,7 +311,7 @@ app.get("/api/cartes/recherche", async (req, res) => {
   }
 });
 
-// --- 3. Statistiques de stock et réacheminements actifs (entre agences uniquement) ---
+// --- 3. Statistiques de stock et réacheminements actifs ---
 app.get("/api/stats", async (req, res) => {
   try {
     const agenceAgent = req.query.agence || "";
@@ -424,7 +414,7 @@ app.get("/api/stats", async (req, res) => {
   }
 });
 
-// --- 4a. Étape 1 : Demander un réacheminement ---
+// --- 4a. Demander un réacheminement ---
 app.post("/api/reacheminement/demander", async (req, res) => {
   try {
     const idCarte = Number(req.body.ligneIndex);
@@ -498,7 +488,7 @@ app.post("/api/reacheminement/demander", async (req, res) => {
   }
 });
 
-// --- 4b. Validation de l'envoi -> bascule directement vers l'agence demanderesse en 'Carte réacheminée' ---
+// --- 4b. Validation de l'envoi ---
 app.post("/api/reacheminement/expedier", async (req, res) => {
   try {
     const idCarte = Number(req.body.ligneIndex);
@@ -537,48 +527,7 @@ app.post("/api/reacheminement/expedier", async (req, res) => {
   }
 });
 
-// --- 4c. Confirmation de réception (conserve la compatibilité si appelée) ---
-app.post("/api/reacheminement/recevoir", async (req, res) => {
-  try {
-    const idCarte = Number(req.body.ligneIndex);
-    const q = await pool.query(
-      `SELECT id, agence, statut_transfert FROM cartes WHERE id = $1 LIMIT 1`,
-      [idCarte]
-    );
-    if (q.rows.length === 0) {
-      return res.status(404).json({ message: "Carte introuvable." });
-    }
-
-    const demandeExtraite = extraireAgenceDemandeur(q.rows[0].statut_transfert);
-    const nouvelleAgenceBrute =
-      req.body.nouvelleAgence || req.body.agenceDemandeur || demandeExtraite;
-    const agenceFinale = normaliserAgence(nouvelleAgenceBrute);
-
-    if (!agenceFinale || agenceFinale === "REGIONAL") {
-      return res
-        .status(400)
-        .json({ message: "Impossible de déterminer l'agence destinataire." });
-    }
-
-    await pool.query(
-      `UPDATE cartes SET agence = $1, statut_transfert = 'Carte réacheminée' WHERE id = $2`,
-      [agenceFinale, idCarte]
-    );
-
-    res.json({
-      success: true,
-      message:
-        "Succès : Carte réceptionnée, rattachée à " +
-        agenceFinale +
-        " et marquée 'Carte réacheminée'.",
-      nouvelleAgence: agenceFinale
-    });
-  } catch (err) {
-    res.status(500).json({ message: "Erreur : " + err.message });
-  }
-});
-
-// --- 5. Retrait en transaction SQL (préserve le 0 initial) ---
+// --- 5. Retrait en transaction SQL ---
 app.post("/api/cartes/retirer", async (req, res) => {
   const client = await pool.connect();
   try {
@@ -681,23 +630,11 @@ app.get("/api/historique", async (req, res) => {
   }
 });
 
-// --- 7. Import massif de cartes depuis CSV (SUP / CE uniquement) ---
+// --- 7. Import massif de cartes depuis CSV ---
 app.post("/api/cartes/import", async (req, res) => {
   const client = await pool.connect();
   try {
-    const roleNorm = normaliserTexte(req.body.role || "");
-    const agenceNorm = normaliserAgence(req.body.agence || "");
-    const estAutorise =
-      roleNorm === "SUPERVISEUR" ||
-      roleNorm === "PATRON" ||
-      roleNorm === "CHEF D'EQUIPE" ||
-      roleNorm === "CHEF_EQUIPE" ||
-      roleNorm === "CHEF EQUIPE" ||
-      roleNorm === "SUP" ||
-      roleNorm === "CE" ||
-      agenceNorm === "REGIONAL";
-
-    if (!estAutorise) {
+    if (!estSuperviseurOuCe(req.body.role, req.body.agence)) {
       return res.status(403).json({ message: "Accès réservé aux profils SUP et CE." });
     }
 
@@ -789,6 +726,382 @@ app.post("/api/cartes/import", async (req, res) => {
   } catch (err) {
     await client.query("ROLLBACK");
     res.status(500).json({ message: "Erreur lors de l'import : " + err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// --- 8. Export CSV du stock actif pour SurveyCTO ---
+app.get("/api/surveycto/export", async (req, res) => {
+  try {
+    const role = req.query.role || "";
+    const agenceQuery = req.query.agence || "";
+    if (!estSuperviseurOuCe(role, agenceQuery)) {
+      return res.status(403).json({ message: "Accès réservé aux profils SUP et CE." });
+    }
+
+    const q = await pool.query(
+      `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis
+       FROM cartes
+       ORDER BY id ASC`
+    );
+
+    const entetes = [
+      "cle_carte",
+      "id_carte",
+      "num_secu",
+      "numero",
+      "nom_complet",
+      "date_naissance",
+      "rangement",
+      "agence",
+      "sous_prefecture",
+      "lieu_precis"
+    ];
+
+    const lignesCsv = [entetes.join(",")];
+
+    for (const r of q.rows) {
+      const agNorm = normaliserAgence(r.agence) || (r.agence || "").toString().trim();
+      const lieu = (r.lieu_precis || "").toString().trim();
+      const sousPref = normaliserTexte(lieu) || agNorm;
+      const nomComplet = `${(r.nom || "").toString().trim()} ${(r.prenoms || "").toString().trim()}`.trim();
+      const numSecu = (r.num_secu || "").toString().trim();
+      const numero = (r.numero || "").toString().trim();
+      const cleCarte = `${r.id}_${numSecu || numero || "SANS_NUM"}`;
+
+      const rowVals = [
+        cleCarte,
+        r.id,
+        numSecu,
+        numero,
+        nomComplet,
+        formaterDateFR(r.date_naissance),
+        (r.rangement || "").toString().trim(),
+        agNorm,
+        sousPref,
+        lieu || agNorm
+      ];
+
+      lignesCsv.push(rowVals.map(echapperCsv).join(","));
+    }
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", 'attachment; filename="cartes_stock.csv"');
+    res.send("\uFEFF" + lignesCsv.join("\r\n"));
+  } catch (err) {
+    res.status(500).json({ message: "Erreur export SurveyCTO : " + err.message });
+  }
+});
+
+// --- 9. Synchronisation des retraits SurveyCTO vers HISTORIQUE ---
+app.post("/api/surveycto/sync", async (req, res) => {
+  const client = await pool.connect();
+  try {
+    if (!estSuperviseurOuCe(req.body.role, req.body.agence)) {
+      return res.status(403).json({ message: "Accès réservé aux profils SUP et CE." });
+    }
+
+    const soumissions = Array.isArray(req.body.soumissions) ? req.body.soumissions : [];
+    if (soumissions.length === 0) {
+      return res.status(400).json({ message: "Aucune soumission valide trouvée dans le CSV." });
+    }
+
+    let archivees = 0;
+    let dejaTraitees = 0;
+    let introuvables = 0;
+
+    await client.query("BEGIN");
+
+    for (const s of soumissions) {
+      const idCarteRaw = (s.carte_id || s.id_carte || s.id || "").toString().trim();
+      const numSecuRaw = (s.carte_num_secu || s.num_secu || "").toString().trim();
+      const numeroRaw = (s.carte_numero || s.numero || "").toString().trim();
+      const retirePar = (s.retire_par || s.nom_mandataire || s.carte_titulaire || "").toString().trim();
+      const telFormate = formaterTelephone10(s.telephone_retrait || s.telephone || "");
+
+      const identifiantAgent = normaliserTexte(s.identifiant_valide || s.identifiant_saisi || s.identifiant || "");
+      const agenceNorm = normaliserAgence(s.agence || "") || "MAN";
+      const agenceRetrait =
+        (s.agence_retrait || "").toString().trim() ||
+        (identifiantAgent ? `${agenceNorm}-(${identifiantAgent})` : agenceNorm);
+
+      const dateRetrait =
+        (s.date_retrait || s.submissiondate || s.endtime || "").toString().trim() ||
+        formaterDateFR(new Date());
+
+      if (!retirePar || !/^\d{10}$/.test(telFormate)) {
+        introuvables++;
+        continue;
+      }
+
+      let carteRow = null;
+
+      if (/^\d+$/.test(idCarteRaw)) {
+        const qId = await client.query(
+          `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis
+           FROM cartes WHERE id = $1 FOR UPDATE`,
+          [Number(idCarteRaw)]
+        );
+        if (qId.rows.length > 0) carteRow = qId.rows[0];
+      }
+
+      if (!carteRow && numSecuRaw) {
+        const qSecu = await client.query(
+          `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis
+           FROM cartes WHERE TRIM(num_secu) = $1 FOR UPDATE LIMIT 1`,
+          [numSecuRaw]
+        );
+        if (qSecu.rows.length > 0) carteRow = qSecu.rows[0];
+      }
+
+      if (!carteRow && numeroRaw) {
+        const qNum = await client.query(
+          `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis
+           FROM cartes WHERE TRIM(numero) = $1 FOR UPDATE LIMIT 1`,
+          [numeroRaw]
+        );
+        if (qNum.rows.length > 0) carteRow = qNum.rows[0];
+      }
+
+      if (!carteRow) {
+        const refVerif = numSecuRaw || numeroRaw;
+        if (refVerif) {
+          const qHist = await client.query(
+            `SELECT id FROM historique WHERE TRIM(num_secu) = $1 OR TRIM(numero) = $1 LIMIT 1`,
+            [refVerif]
+          );
+          if (qHist.rows.length > 0) {
+            dejaTraitees++;
+            continue;
+          }
+        }
+        introuvables++;
+        continue;
+      }
+
+      await client.query(
+        `INSERT INTO historique (
+          rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis,
+          retire_par, telephone_retrait, date_retrait, agence_retrait
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        [
+          carteRow.rangement || "",
+          formaterNumSecu(carteRow.num_secu, carteRow.numero),
+          carteRow.nom || "",
+          carteRow.prenoms || "",
+          formaterDateFR(carteRow.date_naissance),
+          carteRow.numero || "",
+          carteRow.agence || "",
+          carteRow.lieu_precis || "",
+          retirePar,
+          telFormate,
+          dateRetrait,
+          agenceRetrait
+        ]
+      );
+
+      await client.query(`DELETE FROM cartes WHERE id = $1`, [carteRow.id]);
+      archivees++;
+    }
+
+    await client.query("COMMIT");
+
+    res.json({
+      success: true,
+      message: `Synchronisation SurveyCTO terminée : ${archivees} carte(s) archivée(s), ${dejaTraitees} déjà traitée(s), ${introuvables} non trouvée(s)/incomplète(s).`
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    res.status(500).json({ message: "Erreur synchronisation SurveyCTO : " + err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// --- 10. Chargement du stock terrain (par agence et localité/sous-préfecture) ---
+app.get("/api/terrain/cartes", async (req, res) => {
+  try {
+    const agenceFiltre = normaliserAgence(req.query.agence || "");
+    const localiteFiltre = normaliserTexte(req.query.localite || "");
+
+    const q = await pool.query(
+      `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis, statut_transfert
+       FROM cartes
+       ORDER BY nom ASC, prenoms ASC, id ASC`
+    );
+
+    const cartesFiltrees = [];
+
+    for (const r of q.rows) {
+      const agNorm = normaliserAgence(r.agence);
+      const lieuBrut = (r.lieu_precis || "").toString().trim();
+      const lieuNorm = normaliserTexte(lieuBrut);
+
+      if (agenceFiltre && agNorm !== agenceFiltre) {
+        continue;
+      }
+
+      if (localiteFiltre) {
+        const correspondLocalite =
+          lieuNorm === localiteFiltre ||
+          lieuNorm.indexOf(localiteFiltre) !== -1 ||
+          (localiteFiltre === agNorm && lieuNorm === "");
+        if (!correspondLocalite) {
+          continue;
+        }
+      }
+
+      cartesFiltrees.push({
+        id: r.id,
+        rangement: (r.rangement || "Non défini").toString().trim(),
+        numSecu: formaterNumSecu(r.num_secu, r.numero),
+        numSecuBrut: (r.num_secu || "").toString().trim(),
+        numero: (r.numero || "").toString().trim(),
+        nom: (r.nom || "").toString().trim(),
+        prenoms: (r.prenoms || "").toString().trim(),
+        dateNaissance: formaterDateFR(r.date_naissance),
+        agence: agNorm || (r.agence || "").toString().trim(),
+        lieuPrecis: lieuBrut || agNorm
+      });
+    }
+
+    res.json({
+      agence: agenceFiltre || "TOUTES",
+      localite: localiteFiltre || "TOUTES",
+      total: cartesFiltrees.length,
+      cartes: cartesFiltrees
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Erreur chargement stock terrain : " + err.message });
+  }
+});
+
+// --- 11. Synchronisation des retraits effectués hors-ligne sur la PWA Terrain ---
+app.post("/api/terrain/sync", async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const identifiantAgent = normaliserTexte(req.body.identifiant || "");
+    const agenceParDefaut = normaliserAgence(req.body.agence || "") || "MAN";
+    const retraits = Array.isArray(req.body.retraits) ? req.body.retraits : [];
+
+    if (!identifiantAgent) {
+      return res.status(400).json({ message: "Identifiant agent requis pour la synchronisation." });
+    }
+    if (retraits.length === 0) {
+      return res.status(400).json({ message: "Aucun retrait en attente à synchroniser." });
+    }
+
+    let synchronises = 0;
+    let dejaTraites = 0;
+    let erreurs = 0;
+    const idsSynchronises = [];
+
+    await client.query("BEGIN");
+
+    for (const item of retraits) {
+      const idLocal = item.idLocal || null;
+      const idCarte = Number(item.carteId);
+      const numSecu = (item.numSecu || "").toString().trim();
+      const numero = (item.numero || "").toString().trim();
+      const retirePar = (item.retirePar || "").toString().trim();
+      const telFormate = formaterTelephone10(item.telephoneRetrait || "");
+      const agCarte = normaliserAgence(item.agence || agenceParDefaut) || agenceParDefaut;
+      const agenceRetrait =
+        (item.agenceRetrait || "").toString().trim() || `${agCarte}-(${identifiantAgent})`;
+      const dateRetrait =
+        (item.dateRetrait || "").toString().trim() || formaterDateFR(new Date());
+
+      if (!retirePar || !/^\d{10}$/.test(telFormate)) {
+        erreurs++;
+        continue;
+      }
+
+      let carteRow = null;
+
+      if (Number.isInteger(idCarte) && idCarte > 0) {
+        const qId = await client.query(
+          `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis
+           FROM cartes WHERE id = $1 FOR UPDATE`,
+          [idCarte]
+        );
+        if (qId.rows.length > 0) carteRow = qId.rows[0];
+      }
+
+      if (!carteRow && numSecu && numSecu !== "Non renseigné") {
+        const qSecu = await client.query(
+          `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis
+           FROM cartes WHERE TRIM(num_secu) = $1 FOR UPDATE LIMIT 1`,
+          [numSecu]
+        );
+        if (qSecu.rows.length > 0) carteRow = qSecu.rows[0];
+      }
+
+      if (!carteRow && numero) {
+        const qNum = await client.query(
+          `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis
+           FROM cartes WHERE TRIM(numero) = $1 FOR UPDATE LIMIT 1`,
+          [numero]
+        );
+        if (qNum.rows.length > 0) carteRow = qNum.rows[0];
+      }
+
+      if (!carteRow) {
+        const refVerif = (numSecu && numSecu !== "Non renseigné" ? numSecu : "") || numero;
+        if (refVerif) {
+          const qHist = await client.query(
+            `SELECT id FROM historique WHERE TRIM(num_secu) = $1 OR TRIM(numero) = $1 LIMIT 1`,
+            [refVerif]
+          );
+          if (qHist.rows.length > 0) {
+            dejaTraites++;
+            if (idLocal) idsSynchronises.push(idLocal);
+            continue;
+          }
+        }
+        erreurs++;
+        continue;
+      }
+
+      await client.query(
+        `INSERT INTO historique (
+          rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis,
+          retire_par, telephone_retrait, date_retrait, agence_retrait
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        [
+          carteRow.rangement || "",
+          formaterNumSecu(carteRow.num_secu, carteRow.numero),
+          carteRow.nom || "",
+          carteRow.prenoms || "",
+          formaterDateFR(carteRow.date_naissance),
+          carteRow.numero || "",
+          carteRow.agence || agCarte,
+          carteRow.lieu_precis || "",
+          retirePar,
+          telFormate,
+          dateRetrait,
+          agenceRetrait
+        ]
+      );
+
+      await client.query(`DELETE FROM cartes WHERE id = $1`, [carteRow.id]);
+      synchronises++;
+      if (idLocal) idsSynchronises.push(idLocal);
+    }
+
+    await client.query("COMMIT");
+
+    res.json({
+      success: true,
+      synchronises,
+      dejaTraites,
+      erreurs,
+      idsSynchronises,
+      message: `Synchro terminée : ${synchronises} carte(s) archivée(s), ${dejaTraites} déjà traitée(s), ${erreurs} non trouvée(s).`
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    res.status(500).json({ message: "Erreur synchronisation terrain : " + err.message });
   } finally {
     client.release();
   }
