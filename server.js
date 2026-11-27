@@ -153,7 +153,7 @@ function echapperCsv(val) {
 
 // --- Route de santé ---
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true, service: "CMU FINDER TONKPI API", version: "3.5-TERRAIN-SOUS-PREF" });
+  res.json({ ok: true, service: "CMU FINDER TONKPI API", version: "3.6-CONTIENT-AGENCE-SP" });
 });
 
 // --- 1. Connexion ---
@@ -537,17 +537,31 @@ app.get("/api/stats", async (req, res) => {
       SIPILOU: 0,
       "ZOUAN-HOUNIEN": 0
     };
-    let totalRegional = 0;
 
-    const countRes = await pool.query(
-      `SELECT "AGENCE", COUNT(*)::int AS total FROM cartes GROUP BY "AGENCE"`
-    );
-    for (const r of countRes.rows) {
-      const norm = normaliserAgence(r.AGENCE);
-      const cnt = Number(r.total) || 0;
-      totalRegional += cnt;
-      if (parDepartement[norm] !== undefined) {
-        parDepartement[norm] += cnt;
+    const allAgRes = await pool.query(`SELECT "AGENCE" FROM cartes`);
+    const totalRegional = allAgRes.rows.length;
+
+    const matchAgenceContient = (valAgence, cible) => {
+      const a = normaliserTexte(valAgence || "");
+      const c = normaliserTexte(cible || "");
+      if (!a || !c) return false;
+      if (a.includes(c)) return true;
+      const aliasMap = {
+        BIANKOUMA: ["BK"],
+        DANANE: ["DAN"],
+        MAN: ["MAN"],
+        SIPILOU: ["SIP"],
+        "ZOUAN-HOUNIEN": ["ZH", "ZOUAN"]
+      };
+      const aliases = aliasMap[c] || [];
+      return aliases.some((al) => a === al || a.startsWith(al + " ") || a.endsWith(" " + al) || a.includes("-" + al));
+    };
+
+    for (const r of allAgRes.rows) {
+      for (const dept of Object.keys(parDepartement)) {
+        if (matchAgenceContient(r.AGENCE, dept)) {
+          parDepartement[dept] += 1;
+        }
       }
     }
 
@@ -1181,13 +1195,30 @@ app.post("/api/surveycto/sync", async (req, res) => {
   }
 });
 
-// --- 10. Chargement du stock terrain (répartition basée sur SOUS-PREFECTURE en MAJUSCULES) ---
+// --- 10. Chargement du stock terrain (AGENCE contient cible ; SOUS-PREFECTURE contient localite) ---
 app.get("/api/terrain/cartes", async (req, res) => {
   try {
-    const agenceFiltre = normaliserAgence(req.query.agence || "");
+    const agenceBrute = (req.query.agence || "").toString().trim();
+    const agenceFiltre = normaliserAgence(agenceBrute) || normaliserTexte(agenceBrute);
     const localiteBrute =
       req.query.localite || req.query.sous_prefecture || req.query.sousPrefecture || "";
-    const localiteFiltre = normaliserSousPrefecture(localiteBrute);
+    const localiteFiltre = normaliserTexte(localiteBrute);
+
+    const agenceContient = (valAgence, cible) => {
+      const a = normaliserTexte(valAgence || "");
+      const c = normaliserTexte(cible || "");
+      if (!a || !c) return false;
+      if (a.includes(c)) return true;
+      const aliasMap = {
+        BIANKOUMA: ["BK"],
+        DANANE: ["DAN"],
+        MAN: ["MAN"],
+        SIPILOU: ["SIP"],
+        "ZOUAN-HOUNIEN": ["ZH", "ZOUAN"]
+      };
+      const aliases = aliasMap[c] || [];
+      return aliases.some((al) => a === al || a.startsWith(al + " ") || a.endsWith(" " + al) || a.includes("-" + al));
+    };
 
     const q = await pool.query(
       `SELECT id, "RANGEMENT", "NUM_SECU", "NOM", "PRENOMS", "DATE_NAISSANCE", "NUMERO", "AGENCE", "SOUS-PREFECTURE", "LIEU_PRECIS", "STATUT_TRANSFERT"
@@ -1199,26 +1230,22 @@ app.get("/api/terrain/cartes", async (req, res) => {
     const sousPrefSet = new Set();
 
     for (const r of q.rows) {
-      const agNorm = normaliserAgence(r.AGENCE) || normaliserTexte(r.AGENCE || "");
-      const sousPrefCol = normaliserSousPrefecture(r["SOUS-PREFECTURE"] || "");
+      const agBrut = (r.AGENCE || "").toString().trim();
+      const agNorm = normaliserAgence(agBrut) || normaliserTexte(agBrut);
+      const sousPrefColBrut = (r["SOUS-PREFECTURE"] || "").toString().trim();
+      const sousPrefColNorm = normaliserTexte(sousPrefColBrut);
       const lieuBrut = (r.LIEU_PRECIS || "").toString().trim();
-      const lieuNorm = normaliserSousPrefecture(lieuBrut);
-      const sousPrefEffective = sousPrefCol || lieuNorm || agNorm;
 
-      if (agenceFiltre && agNorm !== agenceFiltre) {
+      if (agenceFiltre && !agenceContient(agBrut, agenceFiltre)) {
         continue;
       }
 
-      if (sousPrefEffective) {
-        sousPrefSet.add(sousPrefEffective);
+      if (sousPrefColNorm) {
+        sousPrefSet.add(sousPrefColNorm);
       }
 
       if (localiteFiltre) {
-        const correspondLocalite =
-          sousPrefEffective === localiteFiltre ||
-          sousPrefCol === localiteFiltre ||
-          lieuNorm === localiteFiltre;
-        if (!correspondLocalite) {
+        if (!sousPrefColNorm.includes(localiteFiltre)) {
           continue;
         }
       }
@@ -1232,9 +1259,9 @@ app.get("/api/terrain/cartes", async (req, res) => {
         nom: (r.NOM || "").toString().trim(),
         prenoms: (r.PRENOMS || "").toString().trim(),
         dateNaissance: formaterDateFR(r.DATE_NAISSANCE),
-        agence: agNorm || (r.AGENCE || "").toString().trim(),
-        sousPrefecture: sousPrefEffective,
-        lieuPrecis: lieuBrut || sousPrefEffective || agNorm
+        agence: agNorm || agBrut,
+        sousPrefecture: sousPrefColNorm,
+        lieuPrecis: lieuBrut || sousPrefColNorm || agNorm
       });
     }
 
