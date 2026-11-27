@@ -144,7 +144,7 @@ function echapperCsv(val) {
 
 // --- Route de santé ---
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true, service: "CMU FINDER TONKPI API", version: "3.0-ACCES" });
+  res.json({ ok: true, service: "CMU FINDER TONKPI API", version: "3.1-ACCES" });
 });
 
 // --- 1. Connexion ---
@@ -228,6 +228,7 @@ app.post("/api/comptes/creer", async (req, res) => {
     const nomPrenoms = (req.body.nomComplet || req.body.nom_prenoms || "").toString().trim();
     const roleCible = normaliserTexte(req.body.role || "AGENT") || "AGENT";
     const agenceCible = normaliserAgence(req.body.agence || demandeurAgenceNorm || "MAN") || "MAN";
+    const localiteCible = (req.body.localite || agenceCible || "").toString().trim();
     const motDePasse = (req.body.password || "").toString().trim();
     const numeroTel = formaterTelephone10(req.body.numero || "");
 
@@ -249,17 +250,28 @@ app.post("/api/comptes/creer", async (req, res) => {
       });
     }
 
-    const ins = await pool.query(
-      `INSERT INTO utilisateurs (agence, nom_prenoms, identifiant, mot_de_passe, role, numero, tentatives_suspension)
-       VALUES ($1, $2, $3, $4, $5, $6, '')
-       RETURNING id, agence, nom_prenoms, identifiant, role, numero`,
-      [agenceCible, nomPrenoms, idNouveau, motDePasse, roleCible, numeroTel]
-    );
+    let compte = null;
+    try {
+      const insAvecLoc = await pool.query(
+        `INSERT INTO utilisateurs (agence, localite, nom_prenoms, identifiant, mot_de_passe, role, numero, tentatives_suspension)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, '')
+         RETURNING id, agence, localite, nom_prenoms, identifiant, mot_de_passe, role, numero`,
+        [agenceCible, localiteCible, nomPrenoms, idNouveau, motDePasse, roleCible, numeroTel]
+      );
+      compte = insAvecLoc.rows[0];
+    } catch (e) {
+      const insSansLoc = await pool.query(
+        `INSERT INTO utilisateurs (agence, nom_prenoms, identifiant, mot_de_passe, role, numero, tentatives_suspension)
+         VALUES ($1, $2, $3, $4, $5, $6, '')
+         RETURNING id, agence, nom_prenoms, identifiant, mot_de_passe, role, numero`,
+        [agenceCible, nomPrenoms, idNouveau, motDePasse, roleCible, numeroTel]
+      );
+      compte = Object.assign({}, insSansLoc.rows[0], { localite: localiteCible });
+    }
 
-    const compte = ins.rows[0];
     return res.status(201).json({
       success: true,
-      message: `Accès créé pour ${compte.identifiant} (${compte.role} • ${compte.agence}) par ${demandeurIdNorm || demandeurRoleNorm}.`,
+      message: `Accès créé pour ${compte.identifiant} (${compte.role} • ${compte.agence} • ${compte.localite || agenceCible}) par ${demandeurIdNorm || demandeurRoleNorm}.`,
       compte: compte
     });
   } catch (err) {
@@ -319,6 +331,61 @@ app.post("/api/comptes/mot-de-passe", async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Erreur serveur lors du changement de mot de passe : " + err.message
+    });
+  }
+});
+
+// --- 1d. Liste des comptes avec mot de passe et localité (SUP et CE) ---
+app.get("/api/comptes", async (req, res) => {
+  try {
+    const demandeurRoleNorm = normaliserTexte(req.query.role || "");
+    const demandeurAgenceNorm = normaliserAgence(req.query.agence || "");
+
+    if (!estSuperviseurOuCe(demandeurRoleNorm, demandeurAgenceNorm)) {
+      return res.status(403).json({
+        success: false,
+        message: "Accès réservé aux profils SUP et CE."
+      });
+    }
+
+    let rows = [];
+    try {
+      const qAvecLoc = await pool.query(
+        `SELECT id, agence, localite, nom_prenoms, identifiant, mot_de_passe, role, numero, tentatives_suspension
+         FROM utilisateurs
+         ORDER BY id DESC`
+      );
+      rows = qAvecLoc.rows;
+    } catch (e) {
+      const qSansLoc = await pool.query(
+        `SELECT id, agence, nom_prenoms, identifiant, mot_de_passe, role, numero, tentatives_suspension
+         FROM utilisateurs
+         ORDER BY id DESC`
+      );
+      rows = qSansLoc.rows;
+    }
+
+    const comptes = rows.map((u) => {
+      const ag = (u.agence || "").toString().trim();
+      const loc = (u.localite || "").toString().trim();
+      return {
+        id: u.id,
+        agence: ag,
+        localite: loc || ag || "-",
+        nomPrenoms: (u.nom_prenoms || "").toString().trim(),
+        identifiant: (u.identifiant || "").toString().trim(),
+        motDePasse: (u.mot_de_passe || "").toString().trim(),
+        role: (u.role || "AGENT").toString().trim(),
+        numero: formaterTelephone10(u.numero),
+        etatSecu: (u.tentatives_suspension || "").toString().trim()
+      };
+    });
+
+    return res.json({ success: true, comptes });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: "Erreur serveur lors du chargement des accès : " + err.message
     });
   }
 });
