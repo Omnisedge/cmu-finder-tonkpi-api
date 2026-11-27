@@ -144,7 +144,7 @@ function echapperCsv(val) {
 
 // --- Route de santé ---
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true, service: "CMU FINDER TONKPI API", version: "3.3-SQL-MAJUSCULES" });
+  res.json({ ok: true, service: "CMU FINDER TONKPI API", version: "3.4-ANTI-DOUBLON" });
 });
 
 // --- 1. Connexion ---
@@ -244,7 +244,7 @@ app.post("/api/comptes/creer", async (req, res) => {
       `SELECT id FROM utilisateurs WHERE UPPER(TRIM("IDENTIFIANT")) = $1 LIMIT 1`,
       [idNouveau]
     );
-    if (extant.rows.length > 0) {
+    if (existant.rows.length > 0) {
       return res.status(409).json({
         success: false,
         message: `L'identifiant '${idNouveau}' existe déjà.`
@@ -839,7 +839,7 @@ app.get("/api/historique", async (req, res) => {
   }
 });
 
-// --- 7. Import massif de cartes depuis CSV (avec SOUS-PREFECTURE de référence en MAJUSCULES) ---
+// --- 7. Import massif de cartes (ignore les lignes entières déjà présentes) ---
 app.post("/api/cartes/import", async (req, res) => {
   const client = await pool.connect();
   try {
@@ -858,8 +858,9 @@ app.post("/api/cartes/import", async (req, res) => {
     const agenceDefaut = normaliserAgence(req.body.agenceDefaut || "") || "";
     const sousPrefDefaut = normaliserTexte(req.body.sousPrefectureDefaut || "");
 
+    const empreintesLot = new Set();
     let inserees = 0;
-    let misesAJour = 0;
+    let doublonsIgnores = 0;
 
     await client.query("BEGIN");
 
@@ -889,40 +890,58 @@ app.post("/api/cartes/import", async (req, res) => {
 
       if (!nom && !prenoms && !numSecu && !numero) continue;
 
-      if (numSecu) {
-        const exist = await client.query(
-          `SELECT id FROM cartes WHERE TRIM("NUM_SECU") = $1 LIMIT 1`,
-          [numSecu]
-        );
-        if (exist.rows.length > 0) {
-          await client.query(
-            `UPDATE cartes
-             SET "RANGEMENT" = COALESCE(NULLIF($1, ''), "RANGEMENT"),
-                 "NOM" = COALESCE(NULLIF($2, ''), "NOM"),
-                 "PRENOMS" = COALESCE(NULLIF($3, ''), "PRENOMS"),
-                 "DATE_NAISSANCE" = COALESCE(NULLIF($4, ''), "DATE_NAISSANCE"),
-                 "NUMERO" = COALESCE(NULLIF($5, ''), "NUMERO"),
-                 "AGENCE" = COALESCE(NULLIF($6, ''), "AGENCE"),
-                 "SOUS-PREFECTURE" = COALESCE(NULLIF($7, ''), "SOUS-PREFECTURE"),
-                 "LIEU_PRECIS" = COALESCE(NULLIF($8, ''), "LIEU_PRECIS"),
-                 "STATUT_TRANSFERT" = COALESCE(NULLIF($9, ''), "STATUT_TRANSFERT")
-             WHERE id = $10`,
-            [
-              rangement,
-              nom,
-              prenoms,
-              dateNaissance,
-              numero,
-              agence,
-              sousPrefecture,
-              lieuPrecis,
-              statutTransfert,
-              exist.rows[0].id
-            ]
-          );
-          misesAJour++;
-          continue;
-        }
+      const rNorm = normaliserTexte(rangement);
+      const nsNorm = normaliserTexte(numSecu);
+      const nomNorm = normaliserTexte(nom);
+      const prenNorm = normaliserTexte(prenoms);
+      const dnNorm = normaliserTexte(dateNaissance);
+      const numNorm = normaliserTexte(numero);
+      const agNorm = normaliserTexte(agence);
+      const spNorm = normaliserTexte(sousPrefecture);
+      const lpNorm = normaliserTexte(lieuPrecis);
+
+      const empreinte = [rNorm, nsNorm, nomNorm, prenNorm, dnNorm, numNorm, agNorm, spNorm, lpNorm].join("|");
+
+      if (empreintesLot.has(empreinte)) {
+        doublonsIgnores++;
+        continue;
+      }
+      empreintesLot.add(empreinte);
+
+      const existCartes = await client.query(
+        `SELECT 1 FROM cartes
+         WHERE UPPER(TRIM(COALESCE("RANGEMENT", ''))) = $1
+           AND UPPER(TRIM(COALESCE("NUM_SECU", ''))) = $2
+           AND UPPER(TRIM(COALESCE("NOM", ''))) = $3
+           AND UPPER(TRIM(COALESCE("PRENOMS", ''))) = $4
+           AND UPPER(TRIM(COALESCE("DATE_NAISSANCE", ''))) = $5
+           AND UPPER(TRIM(COALESCE("NUMERO", ''))) = $6
+           AND UPPER(TRIM(COALESCE("AGENCE", ''))) = $7
+           AND UPPER(TRIM(COALESCE("SOUS-PREFECTURE", ''))) = $8
+           AND UPPER(TRIM(COALESCE("LIEU_PRECIS", ''))) = $9
+         LIMIT 1`,
+        [rNorm, nsNorm, nomNorm, prenNorm, dnNorm, numNorm, agNorm, spNorm, lpNorm]
+      );
+
+      if (existCartes.rows.length > 0) {
+        doublonsIgnores++;
+        continue;
+      }
+
+      const existHist = await client.query(
+        `SELECT 1 FROM historique
+         WHERE UPPER(TRIM(COALESCE("NUM_SECU", ''))) = $1
+           AND UPPER(TRIM(COALESCE("NOM", ''))) = $2
+           AND UPPER(TRIM(COALESCE("PRENOMS", ''))) = $3
+           AND UPPER(TRIM(COALESCE("DATE_NAISSANCE", ''))) = $4
+           AND UPPER(TRIM(COALESCE("NUMERO", ''))) = $5
+         LIMIT 1`,
+        [nsNorm, nomNorm, prenNorm, dnNorm, numNorm]
+      );
+
+      if (existHist.rows.length > 0) {
+        doublonsIgnores++;
+        continue;
       }
 
       await client.query(
@@ -948,7 +967,7 @@ app.post("/api/cartes/import", async (req, res) => {
     await client.query("COMMIT");
 
     res.json({
-      message: `Import terminé : ${inserees} carte(s) ajoutée(s), ${misesAJour} mise(s) à jour.`
+      message: `Import terminé : ${inserees} nouvelle(s) carte(s) ajoutée(s), ${doublonsIgnores} doublon(s) ignoré(s).`
     });
   } catch (err) {
     await client.query("ROLLBACK");
