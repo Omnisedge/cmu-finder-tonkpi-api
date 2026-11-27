@@ -144,10 +144,10 @@ function echapperCsv(val) {
 
 // --- Route de santé ---
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true, service: "CMU FINDER TONKPI API", version: "2.9-TERRAIN" });
+  res.json({ ok: true, service: "CMU FINDER TONKPI API", version: "3.0-ACCES" });
 });
 
-// --- 1. Connexion (sans blocage après tentatives incorrectes) ---
+// --- 1. Connexion ---
 app.post("/api/login", async (req, res) => {
   try {
     const idRecherche = req.body.identifiant ? normaliserTexte(req.body.identifiant) : "";
@@ -210,7 +210,120 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
-// --- 2. Recherche rapide (cartes actives + cartes retirées dans historique) ---
+// --- 1b. Création d'un nouvel accès (SUP et CE) ---
+app.post("/api/comptes/creer", async (req, res) => {
+  try {
+    const demandeurRoleNorm = normaliserTexte(req.body.demandeurRole || "");
+    const demandeurAgenceNorm = normaliserAgence(req.body.demandeurAgence || "");
+    const demandeurIdNorm = normaliserTexte(req.body.demandeurId || "");
+
+    if (!estSuperviseurOuCe(demandeurRoleNorm, demandeurAgenceNorm)) {
+      return res.status(403).json({
+        success: false,
+        message: "Accès réservé aux profils SUP et CE."
+      });
+    }
+
+    const idNouveau = normaliserTexte(req.body.identifiant || "");
+    const nomPrenoms = (req.body.nomComplet || req.body.nom_prenoms || "").toString().trim();
+    const roleCible = normaliserTexte(req.body.role || "AGENT") || "AGENT";
+    const agenceCible = normaliserAgence(req.body.agence || demandeurAgenceNorm || "MAN") || "MAN";
+    const motDePasse = (req.body.password || "").toString().trim();
+    const numeroTel = formaterTelephone10(req.body.numero || "");
+
+    if (!idNouveau || !nomPrenoms || !motDePasse || motDePasse.length < 4) {
+      return res.status(400).json({
+        success: false,
+        message: "Identifiant, nom/prénoms et mot de passe (4 caractères minimum) sont obligatoires."
+      });
+    }
+
+    const existant = await pool.query(
+      `SELECT id FROM utilisateurs WHERE UPPER(TRIM(identifiant)) = $1 LIMIT 1`,
+      [idNouveau]
+    );
+    if (extant.rows.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: `L'identifiant '${idNouveau}' existe déjà.`
+      });
+    }
+
+    const ins = await pool.query(
+      `INSERT INTO utilisateurs (agence, nom_prenoms, identifiant, mot_de_passe, role, numero, tentatives_suspension)
+       VALUES ($1, $2, $3, $4, $5, $6, '')
+       RETURNING id, agence, nom_prenoms, identifiant, role, numero`,
+      [agenceCible, nomPrenoms, idNouveau, motDePasse, roleCible, numeroTel]
+    );
+
+    const compte = ins.rows[0];
+    return res.status(201).json({
+      success: true,
+      message: `Accès créé pour ${compte.identifiant} (${compte.role} • ${compte.agence}) par ${demandeurIdNorm || demandeurRoleNorm}.`,
+      compte: compte
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: "Erreur serveur lors de la création de l'accès : " + err.message
+    });
+  }
+});
+
+// --- 1c. Changement de mot de passe (SUP et CE) ---
+app.post("/api/comptes/mot-de-passe", async (req, res) => {
+  try {
+    const demandeurRoleNorm = normaliserTexte(req.body.demandeurRole || "");
+    const demandeurAgenceNorm = normaliserAgence(req.body.demandeurAgence || "");
+    const demandeurIdNorm = normaliserTexte(req.body.demandeurId || "");
+
+    if (!estSuperviseurOuCe(demandeurRoleNorm, demandeurAgenceNorm)) {
+      return res.status(403).json({
+        success: false,
+        message: "Accès réservé aux profils SUP et CE."
+      });
+    }
+
+    const idCible = normaliserTexte(req.body.identifiantCible || "");
+    const nouveauMotDePasse = (req.body.nouveauMotDePasse || "").toString().trim();
+
+    if (!idCible || !nouveauMotDePasse || nouveauMotDePasse.length < 4) {
+      return res.status(400).json({
+        success: false,
+        message: "Identifiant cible et nouveau mot de passe (4 caractères minimum) sont obligatoires."
+      });
+    }
+
+    const q = await pool.query(
+      `SELECT id, identifiant, role, agence FROM utilisateurs WHERE UPPER(TRIM(identifiant)) = $1 LIMIT 1`,
+      [idCible]
+    );
+    if (q.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `Compte '${idCible}' introuvable.`
+      });
+    }
+
+    const cible = q.rows[0];
+    await pool.query(
+      `UPDATE utilisateurs SET mot_de_passe = $1, tentatives_suspension = '' WHERE id = $2`,
+      [nouveauMotDePasse, cible.id]
+    );
+
+    return res.json({
+      success: true,
+      message: `Mot de passe mis à jour pour ${cible.identifiant} (modifié par ${demandeurIdNorm || demandeurRoleNorm}).`
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      message: "Erreur serveur lors du changement de mot de passe : " + err.message
+    });
+  }
+});
+
+// --- 2. Recherche rapide ---
 app.get("/api/cartes/recherche", async (req, res) => {
   try {
     const raw = (req.query.q || "").toString().trim();
@@ -919,7 +1032,7 @@ app.post("/api/surveycto/sync", async (req, res) => {
   }
 });
 
-// --- 10. Chargement du stock terrain (par agence et localité/sous-préfecture) ---
+// --- 10. Chargement du stock terrain (par agence et localité exacte) ---
 app.get("/api/terrain/cartes", async (req, res) => {
   try {
     const agenceFiltre = normaliserAgence(req.query.agence || "");
@@ -945,7 +1058,6 @@ app.get("/api/terrain/cartes", async (req, res) => {
       if (localiteFiltre) {
         const correspondLocalite =
           lieuNorm === localiteFiltre ||
-          lieuNorm.indexOf(localiteFiltre) !== -1 ||
           (localiteFiltre === agNorm && lieuNorm === "");
         if (!correspondLocalite) {
           continue;
