@@ -108,11 +108,11 @@ function extraireAgenceDemandeur(statutStr) {
 async function trouverContactWhatsappAgence(agenceCible) {
   const cibleNorm = normaliserAgence(agenceCible);
   const res = await pool.query(
-    `SELECT agence, numero FROM utilisateurs WHERE numero IS NOT NULL AND TRIM(numero) <> ''`
+    `SELECT "AGENCE", "NUMERO" FROM utilisateurs WHERE "NUMERO" IS NOT NULL AND TRIM("NUMERO") <> ''`
   );
   for (const row of res.rows) {
-    if (normaliserAgence(row.agence) === cibleNorm) {
-      const wa = nettoyerTelephoneWhatsapp(row.numero);
+    if (normaliserAgence(row.AGENCE) === cibleNorm) {
+      const wa = nettoyerTelephoneWhatsapp(row.NUMERO);
       if (wa) return wa;
     }
   }
@@ -144,7 +144,7 @@ function echapperCsv(val) {
 
 // --- Route de santé ---
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true, service: "CMU FINDER TONKPI API", version: "3.1-ACCES" });
+  res.json({ ok: true, service: "CMU FINDER TONKPI API", version: "3.3-SQL-MAJUSCULES" });
 });
 
 // --- 1. Connexion ---
@@ -162,9 +162,9 @@ app.post("/api/login", async (req, res) => {
     }
 
     const q = await pool.query(
-      `SELECT id, agence, nom_prenoms, identifiant, mot_de_passe, role, numero, tentatives_suspension
+      `SELECT id, "AGENCE", "NOM_PRENOMS", "IDENTIFIANT", "MOT_DE_PASSE", "ROLE", "NUMERO", "TENTATIVES_SUSPENSION"
        FROM utilisateurs
-       WHERE UPPER(TRIM(identifiant)) = $1
+       WHERE UPPER(TRIM("IDENTIFIANT")) = $1
        LIMIT 1`,
       [idRecherche]
     );
@@ -178,25 +178,25 @@ app.post("/api/login", async (req, res) => {
     }
 
     const user = q.rows[0];
-    const etatSecu = (user.tentatives_suspension || "").toString().trim();
-    const dbAgence = (user.agence || "").toString().trim();
-    const dbNom = (user.nom_prenoms || "").toString().trim();
-    const dbPass = (user.mot_de_passe || "").toString().trim();
-    const dbRole = user.role ? normaliserTexte(user.role) : "AGENT";
+    const etatSecu = (user.TENTATIVES_SUSPENSION || "").toString().trim();
+    const dbAgence = normaliserAgence(user.AGENCE) || (user.AGENCE || "").toString().trim();
+    const dbNom = (user.NOM_PRENOMS || "").toString().trim();
+    const dbPass = (user.MOT_DE_PASSE || "").toString().trim();
+    const dbRole = user.ROLE ? normaliserTexte(user.ROLE) : "AGENT";
 
     if (dbPass === passRecherche) {
       if (etatSecu !== "") {
-        await pool.query(`UPDATE utilisateurs SET tentatives_suspension = '' WHERE id = $1`, [user.id]);
+        await pool.query(`UPDATE utilisateurs SET "TENTATIVES_SUSPENSION" = '' WHERE id = $1`, [user.id]);
       }
-      const agenceEffective = dbAgence || normaliserAgence(user.identifiant);
+      const agenceEffective = dbAgence || normaliserAgence(user.IDENTIFIANT);
       return res.json({
         success: true,
-        identifiant: (user.identifiant || idRecherche).toString().trim().toUpperCase(),
-        nomComplet: dbNom || user.identifiant,
+        identifiant: (user.IDENTIFIANT || idRecherche).toString().trim().toUpperCase(),
+        nomComplet: dbNom || user.IDENTIFIANT,
         agence: agenceEffective,
         agenceNorm: normaliserAgence(agenceEffective),
         role: dbRole,
-        whatsapp: formaterTelephone10(user.numero)
+        whatsapp: formaterTelephone10(user.NUMERO)
       });
     }
 
@@ -228,7 +228,8 @@ app.post("/api/comptes/creer", async (req, res) => {
     const nomPrenoms = (req.body.nomComplet || req.body.nom_prenoms || "").toString().trim();
     const roleCible = normaliserTexte(req.body.role || "AGENT") || "AGENT";
     const agenceCible = normaliserAgence(req.body.agence || demandeurAgenceNorm || "MAN") || "MAN";
-    const localiteCible = (req.body.localite || agenceCible || "").toString().trim();
+    const localiteCible =
+      normaliserTexte(req.body.localite || req.body.sous_prefecture || agenceCible || "");
     const motDePasse = (req.body.password || "").toString().trim();
     const numeroTel = formaterTelephone10(req.body.numero || "");
 
@@ -240,7 +241,7 @@ app.post("/api/comptes/creer", async (req, res) => {
     }
 
     const existant = await pool.query(
-      `SELECT id FROM utilisateurs WHERE UPPER(TRIM(identifiant)) = $1 LIMIT 1`,
+      `SELECT id FROM utilisateurs WHERE UPPER(TRIM("IDENTIFIANT")) = $1 LIMIT 1`,
       [idNouveau]
     );
     if (extant.rows.length > 0) {
@@ -253,20 +254,40 @@ app.post("/api/comptes/creer", async (req, res) => {
     let compte = null;
     try {
       const insAvecLoc = await pool.query(
-        `INSERT INTO utilisateurs (agence, localite, nom_prenoms, identifiant, mot_de_passe, role, numero, tentatives_suspension)
+        `INSERT INTO utilisateurs ("AGENCE", "LOCALITE", "NOM_PRENOMS", "IDENTIFIANT", "MOT_DE_PASSE", "ROLE", "NUMERO", "TENTATIVES_SUSPENSION")
          VALUES ($1, $2, $3, $4, $5, $6, $7, '')
-         RETURNING id, agence, localite, nom_prenoms, identifiant, mot_de_passe, role, numero`,
+         RETURNING id, "AGENCE", "LOCALITE", "NOM_PRENOMS", "IDENTIFIANT", "MOT_DE_PASSE", "ROLE", "NUMERO"`,
         [agenceCible, localiteCible, nomPrenoms, idNouveau, motDePasse, roleCible, numeroTel]
       );
-      compte = insAvecLoc.rows[0];
+      const r = insAvecLoc.rows[0];
+      compte = {
+        id: r.id,
+        agence: r.AGENCE,
+        localite: r.LOCALITE || localiteCible,
+        nom_prenoms: r.NOM_PRENOMS,
+        identifiant: r.IDENTIFIANT,
+        mot_de_passe: r.MOT_DE_PASSE,
+        role: r.ROLE,
+        numero: r.NUMERO
+      };
     } catch (e) {
       const insSansLoc = await pool.query(
-        `INSERT INTO utilisateurs (agence, nom_prenoms, identifiant, mot_de_passe, role, numero, tentatives_suspension)
+        `INSERT INTO utilisateurs ("AGENCE", "NOM_PRENOMS", "IDENTIFIANT", "MOT_DE_PASSE", "ROLE", "NUMERO", "TENTATIVES_SUSPENSION")
          VALUES ($1, $2, $3, $4, $5, $6, '')
-         RETURNING id, agence, nom_prenoms, identifiant, mot_de_passe, role, numero`,
+         RETURNING id, "AGENCE", "NOM_PRENOMS", "IDENTIFIANT", "MOT_DE_PASSE", "ROLE", "NUMERO"`,
         [agenceCible, nomPrenoms, idNouveau, motDePasse, roleCible, numeroTel]
       );
-      compte = Object.assign({}, insSansLoc.rows[0], { localite: localiteCible });
+      const r = insSansLoc.rows[0];
+      compte = {
+        id: r.id,
+        agence: r.AGENCE,
+        localite: localiteCible,
+        nom_prenoms: r.NOM_PRENOMS,
+        identifiant: r.IDENTIFIANT,
+        mot_de_passe: r.MOT_DE_PASSE,
+        role: r.ROLE,
+        numero: r.NUMERO
+      };
     }
 
     return res.status(201).json({
@@ -307,7 +328,7 @@ app.post("/api/comptes/mot-de-passe", async (req, res) => {
     }
 
     const q = await pool.query(
-      `SELECT id, identifiant, role, agence FROM utilisateurs WHERE UPPER(TRIM(identifiant)) = $1 LIMIT 1`,
+      `SELECT id, "IDENTIFIANT", "ROLE", "AGENCE" FROM utilisateurs WHERE UPPER(TRIM("IDENTIFIANT")) = $1 LIMIT 1`,
       [idCible]
     );
     if (q.rows.length === 0) {
@@ -319,13 +340,13 @@ app.post("/api/comptes/mot-de-passe", async (req, res) => {
 
     const cible = q.rows[0];
     await pool.query(
-      `UPDATE utilisateurs SET mot_de_passe = $1, tentatives_suspension = '' WHERE id = $2`,
+      `UPDATE utilisateurs SET "MOT_DE_PASSE" = $1, "TENTATIVES_SUSPENSION" = '' WHERE id = $2`,
       [nouveauMotDePasse, cible.id]
     );
 
     return res.json({
       success: true,
-      message: `Mot de passe mis à jour pour ${cible.identifiant} (modifié par ${demandeurIdNorm || demandeurRoleNorm}).`
+      message: `Mot de passe mis à jour pour ${cible.IDENTIFIANT} (modifié par ${demandeurIdNorm || demandeurRoleNorm}).`
     });
   } catch (err) {
     return res.status(500).json({
@@ -351,14 +372,14 @@ app.get("/api/comptes", async (req, res) => {
     let rows = [];
     try {
       const qAvecLoc = await pool.query(
-        `SELECT id, agence, localite, nom_prenoms, identifiant, mot_de_passe, role, numero, tentatives_suspension
+        `SELECT id, "AGENCE", "LOCALITE", "NOM_PRENOMS", "IDENTIFIANT", "MOT_DE_PASSE", "ROLE", "NUMERO", "TENTATIVES_SUSPENSION"
          FROM utilisateurs
          ORDER BY id DESC`
       );
       rows = qAvecLoc.rows;
     } catch (e) {
       const qSansLoc = await pool.query(
-        `SELECT id, agence, nom_prenoms, identifiant, mot_de_passe, role, numero, tentatives_suspension
+        `SELECT id, "AGENCE", "NOM_PRENOMS", "IDENTIFIANT", "MOT_DE_PASSE", "ROLE", "NUMERO", "TENTATIVES_SUSPENSION"
          FROM utilisateurs
          ORDER BY id DESC`
       );
@@ -366,18 +387,18 @@ app.get("/api/comptes", async (req, res) => {
     }
 
     const comptes = rows.map((u) => {
-      const ag = (u.agence || "").toString().trim();
-      const loc = (u.localite || "").toString().trim();
+      const ag = normaliserAgence(u.AGENCE) || (u.AGENCE || "").toString().trim();
+      const loc = normaliserTexte(u.LOCALITE || "");
       return {
         id: u.id,
         agence: ag,
         localite: loc || ag || "-",
-        nomPrenoms: (u.nom_prenoms || "").toString().trim(),
-        identifiant: (u.identifiant || "").toString().trim(),
-        motDePasse: (u.mot_de_passe || "").toString().trim(),
-        role: (u.role || "AGENT").toString().trim(),
-        numero: formaterTelephone10(u.numero),
-        etatSecu: (u.tentatives_suspension || "").toString().trim()
+        nomPrenoms: (u.NOM_PRENOMS || "").toString().trim(),
+        identifiant: (u.IDENTIFIANT || "").toString().trim(),
+        motDePasse: (u.MOT_DE_PASSE || "").toString().trim(),
+        role: (u.ROLE || "AGENT").toString().trim(),
+        numero: formaterTelephone10(u.NUMERO),
+        etatSecu: (u.TENTATIVES_SUSPENSION || "").toString().trim()
       };
     });
 
@@ -401,10 +422,10 @@ app.get("/api/cartes/recherche", async (req, res) => {
     const likeTerm = `%${terme}%`;
 
     const exactRes = await pool.query(
-      `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis, statut_transfert
+      `SELECT id, "RANGEMENT", "NUM_SECU", "NOM", "PRENOMS", "DATE_NAISSANCE", "NUMERO", "AGENCE", "SOUS-PREFECTURE", "LIEU_PRECIS", "STATUT_TRANSFERT"
        FROM cartes
-       WHERE LOWER(TRIM(COALESCE(num_secu, ''))) = $1
-          OR LOWER(TRIM(COALESCE(numero, ''))) = $1
+       WHERE LOWER(TRIM(COALESCE("NUM_SECU", ''))) = $1
+          OR LOWER(TRIM(COALESCE("NUMERO", ''))) = $1
        LIMIT $2`,
       [terme, limite]
     );
@@ -414,14 +435,14 @@ app.get("/api/cartes/recherche", async (req, res) => {
     if (rowsCartes.length < limite) {
       const existingIds = rowsCartes.map((r) => r.id);
       const partRes = await pool.query(
-        `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis, statut_transfert
+        `SELECT id, "RANGEMENT", "NUM_SECU", "NOM", "PRENOMS", "DATE_NAISSANCE", "NUMERO", "AGENCE", "SOUS-PREFECTURE", "LIEU_PRECIS", "STATUT_TRANSFERT"
          FROM cartes
          WHERE (
-           LOWER(COALESCE(nom, '')) LIKE $1
-           OR LOWER(COALESCE(prenoms, '')) LIKE $1
-           OR LOWER(COALESCE(nom, '') || ' ' || COALESCE(prenoms, '')) LIKE $1
-           OR LOWER(COALESCE(num_secu, '')) LIKE $1
-           OR LOWER(COALESCE(numero, '')) LIKE $1
+           LOWER(COALESCE("NOM", '')) LIKE $1
+           OR LOWER(COALESCE("PRENOMS", '')) LIKE $1
+           OR LOWER(COALESCE("NOM", '') || ' ' || COALESCE("PRENOMS", '')) LIKE $1
+           OR LOWER(COALESCE("NUM_SECU", '')) LIKE $1
+           OR LOWER(COALESCE("NUMERO", '')) LIKE $1
          )
          AND NOT (id = ANY($2::int[]))
          LIMIT $3`,
@@ -431,52 +452,56 @@ app.get("/api/cartes/recherche", async (req, res) => {
     }
 
     const formattedActives = rowsCartes.map((r) => {
-      const agence = (r.agence || "Non définie").toString().trim();
+      const agence = normaliserAgence(r.AGENCE) || (r.AGENCE || "Non définie").toString().trim();
+      const sousPref = normaliserTexte(r["SOUS-PREFECTURE"] || "");
+      const lieu = (r.LIEU_PRECIS || sousPref || "Non défini").toString().trim();
       return {
         ligneIndex: r.id,
-        rangement: (r.rangement || "Non défini").toString().trim(),
-        numSecu: formaterNumSecu(r.num_secu, r.numero),
-        nom: (r.nom || "").toString().trim(),
-        prenoms: (r.prenoms || "").toString().trim(),
-        dateNaissance: formaterDateFR(r.date_naissance),
+        rangement: (r.RANGEMENT || "Non défini").toString().trim(),
+        numSecu: formaterNumSecu(r.NUM_SECU, r.NUMERO),
+        nom: (r.NOM || "").toString().trim(),
+        prenoms: (r.PRENOMS || "").toString().trim(),
+        dateNaissance: formaterDateFR(r.DATE_NAISSANCE),
         agence,
         agenceNorm: normaliserAgence(agence),
-        lieuPrecis: (r.lieu_precis || "Non défini").toString().trim(),
-        statut: (r.statut_transfert || "DISPONIBLE").toString().trim(),
+        sousPrefecture: sousPref,
+        lieuPrecis: lieu,
+        statut: (r.STATUT_TRANSFERT || "DISPONIBLE").toString().trim(),
         estRetiree: false
       };
     });
 
     const resteLimite = Math.max(10, limite - formattedActives.length);
     const histRes = await pool.query(
-      `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis,
-              retire_par, telephone_retrait, date_retrait, agence_retrait
+      `SELECT id, "RANGEMENT", "NUM_SECU", "NOM", "PRENOMS", "DATE_NAISSANCE", "NUMERO", "AGENCE", "SOUS-PREFECTURE", "LIEU_PRECIS",
+              "RETIRE_PAR", "TELEPHONE_RETRAIT", "DATE_RETRAIT", "AGENCE_RETRAIT"
        FROM historique
-       WHERE LOWER(COALESCE(nom, '')) LIKE $1
-          OR LOWER(COALESCE(prenoms, '')) LIKE $1
-          OR LOWER(COALESCE(nom, '') || ' ' || COALESCE(prenoms, '')) LIKE $1
-          OR LOWER(COALESCE(num_secu, '')) LIKE $1
-          OR LOWER(COALESCE(numero, '')) LIKE $1
+       WHERE LOWER(COALESCE("NOM", '')) LIKE $1
+          OR LOWER(COALESCE("PRENOMS", '')) LIKE $1
+          OR LOWER(COALESCE("NOM", '') || ' ' || COALESCE("PRENOMS", '')) LIKE $1
+          OR LOWER(COALESCE("NUM_SECU", '')) LIKE $1
+          OR LOWER(COALESCE("NUMERO", '')) LIKE $1
        ORDER BY id DESC
        LIMIT $2`,
       [likeTerm, resteLimite]
     );
 
     const formattedHist = histRes.rows.map((h) => {
-      const agOrig = (h.agence || "").toString().trim();
-      const agRet = (h.agence_retrait || "").toString().trim();
-      const retirePar = (h.retire_par || "Inconnu").toString().trim();
-      const dateRet = formaterDateFR(h.date_retrait);
+      const agOrig = normaliserAgence(h.AGENCE) || (h.AGENCE || "").toString().trim();
+      const agRet = normaliserAgence(h.AGENCE_RETRAIT) || (h.AGENCE_RETRAIT || "").toString().trim();
+      const retirePar = (h.RETIRE_PAR || "Inconnu").toString().trim();
+      const dateRet = formaterDateFR(h.DATE_RETRAIT);
       return {
         ligneIndex: null,
-        rangement: (h.rangement || "Archivé").toString().trim(),
-        numSecu: formaterNumSecu(h.num_secu, h.numero),
-        nom: (h.nom || "").toString().trim(),
-        prenoms: (h.prenoms || "").toString().trim(),
-        dateNaissance: formaterDateFR(h.date_naissance),
+        rangement: (h.RANGEMENT || "Archivé").toString().trim(),
+        numSecu: formaterNumSecu(h.NUM_SECU, h.NUMERO),
+        nom: (h.NOM || "").toString().trim(),
+        prenoms: (h.PRENOMS || "").toString().trim(),
+        dateNaissance: formaterDateFR(h.DATE_NAISSANCE),
         agence: agOrig || agRet,
         agenceNorm: normaliserAgence(agOrig || agRet),
-        lieuPrecis: (h.lieu_precis || "").toString().trim(),
+        sousPrefecture: normaliserTexte(h["SOUS-PREFECTURE"] || ""),
+        lieuPrecis: (h.LIEU_PRECIS || "").toString().trim(),
         statut: `Carte Retirée par ${retirePar} le ${dateRet}`,
         retirePar,
         dateRetrait: dateRet,
@@ -506,10 +531,10 @@ app.get("/api/stats", async (req, res) => {
     let totalRegional = 0;
 
     const countRes = await pool.query(
-      `SELECT agence, COUNT(*)::int AS total FROM cartes GROUP BY agence`
+      `SELECT "AGENCE", COUNT(*)::int AS total FROM cartes GROUP BY "AGENCE"`
     );
     for (const r of countRes.rows) {
-      const norm = normaliserAgence(r.agence);
+      const norm = normaliserAgence(r.AGENCE);
       const cnt = Number(r.total) || 0;
       totalRegional += cnt;
       if (parDepartement[norm] !== undefined) {
@@ -518,11 +543,11 @@ app.get("/api/stats", async (req, res) => {
     }
 
     const transRes = await pool.query(
-      `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, statut_transfert
+      `SELECT id, "RANGEMENT", "NUM_SECU", "NOM", "PRENOMS", "DATE_NAISSANCE", "NUMERO", "AGENCE", "STATUT_TRANSFERT"
        FROM cartes
-       WHERE UPPER(COALESCE(statut_transfert, '')) LIKE '%DEMANDE DE REACHEMINEMENT%'
-          OR UPPER(COALESCE(statut_transfert, '')) LIKE '%REACHEMINEMENT EN COURS%'
-          OR UPPER(COALESCE(statut_transfert, '')) LIKE '%TRANSFERT%'
+       WHERE UPPER(COALESCE("STATUT_TRANSFERT", '')) LIKE '%DEMANDE DE REACHEMINEMENT%'
+          OR UPPER(COALESCE("STATUT_TRANSFERT", '')) LIKE '%REACHEMINEMENT EN COURS%'
+          OR UPPER(COALESCE("STATUT_TRANSFERT", '')) LIKE '%TRANSFERT%'
        ORDER BY id DESC`
     );
 
@@ -530,9 +555,9 @@ app.get("/api/stats", async (req, res) => {
     const transfertsEnCours = [];
 
     for (const t of transRes.rows) {
-      const statut = (t.statut_transfert || "").toString().trim();
+      const statut = (t.STATUT_TRANSFERT || "").toString().trim();
       const statutNorm = normaliserTexte(statut);
-      const agenceBrute = (t.agence || "").toString().trim();
+      const agenceBrute = normaliserAgence(t.AGENCE) || (t.AGENCE || "").toString().trim();
       const agenceCarteNorm = normaliserAgence(agenceBrute);
       const agenceDemandeur = extraireAgenceDemandeur(statut);
       const estEnCours =
@@ -547,11 +572,11 @@ app.get("/api/stats", async (req, res) => {
           (agenceCarteNorm && agenceCarteNorm === agenceAgentNorm));
 
       if (concerneAgence) {
-        const numSecu = formaterNumSecu(t.num_secu, t.numero);
-        const rangement = (t.rangement || "Non défini").toString().trim();
-        const nom = (t.nom || "").toString().trim();
-        const prenoms = (t.prenoms || "").toString().trim();
-        const dateNaissance = formaterDateFR(t.date_naissance);
+        const numSecu = formaterNumSecu(t.NUM_SECU, t.NUMERO);
+        const rangement = (t.RANGEMENT || "Non défini").toString().trim();
+        const nom = (t.NOM || "").toString().trim();
+        const prenoms = (t.PRENOMS || "").toString().trim();
+        const dateNaissance = formaterDateFR(t.DATE_NAISSANCE);
 
         const telDetenteur = await trouverContactWhatsappAgence(agenceCarteNorm);
         const msgWhatsapp =
@@ -601,7 +626,7 @@ app.post("/api/reacheminement/demander", async (req, res) => {
     const demandeurNorm = normaliserAgence(req.body.agenceDemandeur);
 
     const q = await pool.query(
-      `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence
+      `SELECT id, "RANGEMENT", "NUM_SECU", "NOM", "PRENOMS", "DATE_NAISSANCE", "NUMERO", "AGENCE"
        FROM cartes WHERE id = $1 LIMIT 1`,
       [idCarte]
     );
@@ -610,12 +635,12 @@ app.post("/api/reacheminement/demander", async (req, res) => {
     }
 
     const carte = q.rows[0];
-    const rangement = carte.rangement || "Non défini";
-    const numSecu = formaterNumSecu(carte.num_secu, carte.numero);
-    const nom = carte.nom || "";
-    const prenoms = carte.prenoms || "";
-    const dateNais = formaterDateFR(carte.date_naissance);
-    const agenceDetentrice = carte.agence ? carte.agence.toString().trim() : "";
+    const rangement = carte.RANGEMENT || "Non défini";
+    const numSecu = formaterNumSecu(carte.NUM_SECU, carte.NUMERO);
+    const nom = carte.NOM || "";
+    const prenoms = carte.PRENOMS || "";
+    const dateNais = formaterDateFR(carte.DATE_NAISSANCE);
+    const agenceDetentrice = normaliserAgence(carte.AGENCE) || (carte.AGENCE ? carte.AGENCE.toString().trim() : "");
 
     const nouveauStatut =
       "DEMANDE DE REACHEMINEMENT VERS " +
@@ -624,7 +649,7 @@ app.post("/api/reacheminement/demander", async (req, res) => {
       normaliserAgence(agenceDetentrice) +
       ")";
 
-    await pool.query(`UPDATE cartes SET statut_transfert = $1 WHERE id = $2`, [
+    await pool.query(`UPDATE cartes SET "STATUT_TRANSFERT" = $1 WHERE id = $2`, [
       nouveauStatut,
       idCarte
     ]);
@@ -673,14 +698,14 @@ app.post("/api/reacheminement/expedier", async (req, res) => {
   try {
     const idCarte = Number(req.body.ligneIndex);
     const q = await pool.query(
-      `SELECT id, agence, statut_transfert FROM cartes WHERE id = $1 LIMIT 1`,
+      `SELECT id, "AGENCE", "STATUT_TRANSFERT" FROM cartes WHERE id = $1 LIMIT 1`,
       [idCarte]
     );
     if (q.rows.length === 0) {
       return res.status(404).json({ message: "Carte introuvable." });
     }
 
-    const statutActuel = (q.rows[0].statut_transfert || "").toString();
+    const statutActuel = (q.rows[0].STATUT_TRANSFERT || "").toString();
     const cible = req.body.agenceDemandeurCible
       ? normaliserAgence(req.body.agenceDemandeurCible)
       : extraireAgenceDemandeur(statutActuel);
@@ -692,7 +717,7 @@ app.post("/api/reacheminement/expedier", async (req, res) => {
     }
 
     await pool.query(
-      `UPDATE cartes SET agence = $1, statut_transfert = 'Carte réacheminée' WHERE id = $2`,
+      `UPDATE cartes SET "AGENCE" = $1, "STATUT_TRANSFERT" = 'Carte réacheminée' WHERE id = $2`,
       [cible, idCarte]
     );
 
@@ -725,7 +750,7 @@ app.post("/api/cartes/retirer", async (req, res) => {
     await client.query("BEGIN");
 
     const sel = await client.query(
-      `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis
+      `SELECT id, "RANGEMENT", "NUM_SECU", "NOM", "PRENOMS", "DATE_NAISSANCE", "NUMERO", "AGENCE", "SOUS-PREFECTURE", "LIEU_PRECIS"
        FROM cartes WHERE id = $1 FOR UPDATE`,
       [idCarte]
     );
@@ -739,21 +764,24 @@ app.post("/api/cartes/retirer", async (req, res) => {
     const now = new Date();
     const pad = (n) => String(n).padStart(2, "0");
     const dateFormatee = `${pad(now.getDate())}/${pad(now.getMonth() + 1)}/${now.getFullYear()} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+    const agOrigMaj = normaliserAgence(c.AGENCE) || (c.AGENCE || "").toString().trim();
+    const sousPrefMaj = normaliserTexte(c["SOUS-PREFECTURE"] || "") || normaliserTexte(c.LIEU_PRECIS || "") || agOrigMaj;
 
     await client.query(
       `INSERT INTO historique (
-        rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis,
-        retire_par, telephone_retrait, date_retrait, agence_retrait
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        "RANGEMENT", "NUM_SECU", "NOM", "PRENOMS", "DATE_NAISSANCE", "NUMERO", "AGENCE", "SOUS-PREFECTURE", "LIEU_PRECIS",
+        "RETIRE_PAR", "TELEPHONE_RETRAIT", "DATE_RETRAIT", "AGENCE_RETRAIT"
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [
-        c.rangement || "",
-        formaterNumSecu(c.num_secu, c.numero),
-        c.nom || "",
-        c.prenoms || "",
-        formaterDateFR(c.date_naissance),
-        c.numero || "",
-        c.agence || "",
-        c.lieu_precis || "",
+        c.RANGEMENT || "",
+        formaterNumSecu(c.NUM_SECU, c.NUMERO),
+        c.NOM || "",
+        c.PRENOMS || "",
+        formaterDateFR(c.DATE_NAISSANCE),
+        c.NUMERO || "",
+        agOrigMaj,
+        sousPrefMaj,
+        c.LIEU_PRECIS || "",
         retirePar,
         telFormate,
         dateFormatee,
@@ -777,28 +805,29 @@ app.post("/api/cartes/retirer", async (req, res) => {
 app.get("/api/historique", async (req, res) => {
   try {
     const q = await pool.query(
-      `SELECT rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis,
-              retire_par, telephone_retrait, date_retrait, agence_retrait
+      `SELECT "RANGEMENT", "NUM_SECU", "NOM", "PRENOMS", "DATE_NAISSANCE", "NUMERO", "AGENCE", "SOUS-PREFECTURE", "LIEU_PRECIS",
+              "RETIRE_PAR", "TELEPHONE_RETRAIT", "DATE_RETRAIT", "AGENCE_RETRAIT"
        FROM historique
        ORDER BY id DESC
        LIMIT 500`
     );
 
     const list = q.rows.map((h) => {
-      const agOrig = (h.agence || "").toString().trim();
-      const agRet = (h.agence_retrait || "").toString().trim();
+      const agOrig = normaliserAgence(h.AGENCE) || (h.AGENCE || "").toString().trim();
+      const agRet = normaliserAgence(h.AGENCE_RETRAIT) || (h.AGENCE_RETRAIT || "").toString().trim();
       return {
-        rangement: h.rangement || "",
-        numSecu: formaterNumSecu(h.num_secu, h.numero),
-        nom: h.nom || "",
-        prenoms: h.prenoms || "",
-        dateNaissance: formaterDateFR(h.date_naissance),
+        rangement: h.RANGEMENT || "",
+        numSecu: formaterNumSecu(h.NUM_SECU, h.NUMERO),
+        nom: h.NOM || "",
+        prenoms: h.PRENOMS || "",
+        dateNaissance: formaterDateFR(h.DATE_NAISSANCE),
         agenceOrigine: agOrig,
         agenceOrigineNorm: normaliserAgence(agOrig),
-        lieuPrecis: h.lieu_precis || "",
-        retirePar: h.retire_par || "",
-        telephone: formaterTelephone10(h.telephone_retrait),
-        dateRetrait: formaterDateFR(h.date_retrait),
+        sousPrefecture: normaliserTexte(h["SOUS-PREFECTURE"] || ""),
+        lieuPrecis: h.LIEU_PRECIS || "",
+        retirePar: h.RETIRE_PAR || "",
+        telephone: formaterTelephone10(h.TELEPHONE_RETRAIT),
+        dateRetrait: formaterDateFR(h.DATE_RETRAIT),
         agenceRetrait: agRet,
         agenceRetraitNorm: normaliserAgence(agRet)
       };
@@ -810,7 +839,7 @@ app.get("/api/historique", async (req, res) => {
   }
 });
 
-// --- 7. Import massif de cartes depuis CSV ---
+// --- 7. Import massif de cartes depuis CSV (avec SOUS-PREFECTURE de référence en MAJUSCULES) ---
 app.post("/api/cartes/import", async (req, res) => {
   const client = await pool.connect();
   try {
@@ -826,6 +855,9 @@ app.post("/api/cartes/import", async (req, res) => {
       return res.status(400).json({ message: "Limite de 5 000 lignes par import dépassée." });
     }
 
+    const agenceDefaut = normaliserAgence(req.body.agenceDefaut || "") || "";
+    const sousPrefDefaut = normaliserTexte(req.body.sousPrefectureDefaut || "");
+
     let inserees = 0;
     let misesAJour = 0;
 
@@ -838,8 +870,20 @@ app.post("/api/cartes/import", async (req, res) => {
       const prenoms = (item.prenoms || "").toString().trim();
       const dateNaissance = (item.date_naissance || item.dateNaissance || "").toString().trim();
       const numero = (item.numero || "").toString().trim();
-      const agence = normaliserAgence(item.agence || "") || (item.agence || "").toString().trim();
+      const agence =
+        normaliserAgence(item.agence || "") ||
+        normaliserTexte(item.agence || "") ||
+        agenceDefaut;
       const lieuPrecis = (item.lieu_precis || item.lieuPrecis || "").toString().trim();
+      const sousPrefRaw =
+        item.sous_prefecture ||
+        item.sousPrefecture ||
+        item["sous-prefecture"] ||
+        item["sous_prefecture"] ||
+        sousPrefDefaut ||
+        "";
+      const sousPrefecture =
+        normaliserTexte(sousPrefRaw) || normaliserTexte(lieuPrecis) || agence;
       const statutTransfert =
         (item.statut_transfert || item.statut || "DISPONIBLE").toString().trim() || "DISPONIBLE";
 
@@ -847,21 +891,22 @@ app.post("/api/cartes/import", async (req, res) => {
 
       if (numSecu) {
         const exist = await client.query(
-          `SELECT id FROM cartes WHERE TRIM(num_secu) = $1 LIMIT 1`,
+          `SELECT id FROM cartes WHERE TRIM("NUM_SECU") = $1 LIMIT 1`,
           [numSecu]
         );
         if (exist.rows.length > 0) {
           await client.query(
             `UPDATE cartes
-             SET rangement = COALESCE(NULLIF($1, ''), rangement),
-                 nom = COALESCE(NULLIF($2, ''), nom),
-                 prenoms = COALESCE(NULLIF($3, ''), prenoms),
-                 date_naissance = COALESCE(NULLIF($4, ''), date_naissance),
-                 numero = COALESCE(NULLIF($5, ''), numero),
-                 agence = COALESCE(NULLIF($6, ''), agence),
-                 lieu_precis = COALESCE(NULLIF($7, ''), lieu_precis),
-                 statut_transfert = COALESCE(NULLIF($8, ''), statut_transfert)
-             WHERE id = $9`,
+             SET "RANGEMENT" = COALESCE(NULLIF($1, ''), "RANGEMENT"),
+                 "NOM" = COALESCE(NULLIF($2, ''), "NOM"),
+                 "PRENOMS" = COALESCE(NULLIF($3, ''), "PRENOMS"),
+                 "DATE_NAISSANCE" = COALESCE(NULLIF($4, ''), "DATE_NAISSANCE"),
+                 "NUMERO" = COALESCE(NULLIF($5, ''), "NUMERO"),
+                 "AGENCE" = COALESCE(NULLIF($6, ''), "AGENCE"),
+                 "SOUS-PREFECTURE" = COALESCE(NULLIF($7, ''), "SOUS-PREFECTURE"),
+                 "LIEU_PRECIS" = COALESCE(NULLIF($8, ''), "LIEU_PRECIS"),
+                 "STATUT_TRANSFERT" = COALESCE(NULLIF($9, ''), "STATUT_TRANSFERT")
+             WHERE id = $10`,
             [
               rangement,
               nom,
@@ -869,6 +914,7 @@ app.post("/api/cartes/import", async (req, res) => {
               dateNaissance,
               numero,
               agence,
+              sousPrefecture,
               lieuPrecis,
               statutTransfert,
               exist.rows[0].id
@@ -881,8 +927,8 @@ app.post("/api/cartes/import", async (req, res) => {
 
       await client.query(
         `INSERT INTO cartes (
-          rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis, statut_transfert
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          "RANGEMENT", "NUM_SECU", "NOM", "PRENOMS", "DATE_NAISSANCE", "NUMERO", "AGENCE", "SOUS-PREFECTURE", "LIEU_PRECIS", "STATUT_TRANSFERT"
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
         [
           rangement,
           numSecu,
@@ -891,6 +937,7 @@ app.post("/api/cartes/import", async (req, res) => {
           dateNaissance,
           numero,
           agence,
+          sousPrefecture,
           lieuPrecis,
           statutTransfert
         ]
@@ -921,7 +968,7 @@ app.get("/api/surveycto/export", async (req, res) => {
     }
 
     const q = await pool.query(
-      `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis
+      `SELECT id, "RANGEMENT", "NUM_SECU", "NOM", "PRENOMS", "DATE_NAISSANCE", "NUMERO", "AGENCE", "SOUS-PREFECTURE", "LIEU_PRECIS"
        FROM cartes
        ORDER BY id ASC`
     );
@@ -942,12 +989,12 @@ app.get("/api/surveycto/export", async (req, res) => {
     const lignesCsv = [entetes.join(",")];
 
     for (const r of q.rows) {
-      const agNorm = normaliserAgence(r.agence) || (r.agence || "").toString().trim();
-      const lieu = (r.lieu_precis || "").toString().trim();
-      const sousPref = normaliserTexte(lieu) || agNorm;
-      const nomComplet = `${(r.nom || "").toString().trim()} ${(r.prenoms || "").toString().trim()}`.trim();
-      const numSecu = (r.num_secu || "").toString().trim();
-      const numero = (r.numero || "").toString().trim();
+      const agNorm = normaliserAgence(r.AGENCE) || normaliserTexte(r.AGENCE || "");
+      const lieu = (r.LIEU_PRECIS || "").toString().trim();
+      const sousPref = normaliserTexte(r["SOUS-PREFECTURE"] || "") || normaliserTexte(lieu) || agNorm;
+      const nomComplet = `${(r.NOM || "").toString().trim()} ${(r.PRENOMS || "").toString().trim()}`.trim();
+      const numSecu = (r.NUM_SECU || "").toString().trim();
+      const numero = (r.NUMERO || "").toString().trim();
       const cleCarte = `${r.id}_${numSecu || numero || "SANS_NUM"}`;
 
       const rowVals = [
@@ -956,11 +1003,11 @@ app.get("/api/surveycto/export", async (req, res) => {
         numSecu,
         numero,
         nomComplet,
-        formaterDateFR(r.date_naissance),
-        (r.rangement || "").toString().trim(),
+        formaterDateFR(r.DATE_NAISSANCE),
+        (r.RANGEMENT || "").toString().trim(),
         agNorm,
         sousPref,
-        lieu || agNorm
+        lieu || sousPref || agNorm
       ];
 
       lignesCsv.push(rowVals.map(echapperCsv).join(","));
@@ -1003,7 +1050,7 @@ app.post("/api/surveycto/sync", async (req, res) => {
       const identifiantAgent = normaliserTexte(s.identifiant_valide || s.identifiant_saisi || s.identifiant || "");
       const agenceNorm = normaliserAgence(s.agence || "") || "MAN";
       const agenceRetrait =
-        (s.agence_retrait || "").toString().trim() ||
+        normaliserTexte(s.agence_retrait || "") ||
         (identifiantAgent ? `${agenceNorm}-(${identifiantAgent})` : agenceNorm);
 
       const dateRetrait =
@@ -1019,7 +1066,7 @@ app.post("/api/surveycto/sync", async (req, res) => {
 
       if (/^\d+$/.test(idCarteRaw)) {
         const qId = await client.query(
-          `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis
+          `SELECT id, "RANGEMENT", "NUM_SECU", "NOM", "PRENOMS", "DATE_NAISSANCE", "NUMERO", "AGENCE", "SOUS-PREFECTURE", "LIEU_PRECIS"
            FROM cartes WHERE id = $1 FOR UPDATE`,
           [Number(idCarteRaw)]
         );
@@ -1028,8 +1075,8 @@ app.post("/api/surveycto/sync", async (req, res) => {
 
       if (!carteRow && numSecuRaw) {
         const qSecu = await client.query(
-          `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis
-           FROM cartes WHERE TRIM(num_secu) = $1 FOR UPDATE LIMIT 1`,
+          `SELECT id, "RANGEMENT", "NUM_SECU", "NOM", "PRENOMS", "DATE_NAISSANCE", "NUMERO", "AGENCE", "SOUS-PREFECTURE", "LIEU_PRECIS"
+           FROM cartes WHERE TRIM("NUM_SECU") = $1 FOR UPDATE LIMIT 1`,
           [numSecuRaw]
         );
         if (qSecu.rows.length > 0) carteRow = qSecu.rows[0];
@@ -1037,8 +1084,8 @@ app.post("/api/surveycto/sync", async (req, res) => {
 
       if (!carteRow && numeroRaw) {
         const qNum = await client.query(
-          `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis
-           FROM cartes WHERE TRIM(numero) = $1 FOR UPDATE LIMIT 1`,
+          `SELECT id, "RANGEMENT", "NUM_SECU", "NOM", "PRENOMS", "DATE_NAISSANCE", "NUMERO", "AGENCE", "SOUS-PREFECTURE", "LIEU_PRECIS"
+           FROM cartes WHERE TRIM("NUMERO") = $1 FOR UPDATE LIMIT 1`,
           [numeroRaw]
         );
         if (qNum.rows.length > 0) carteRow = qNum.rows[0];
@@ -1048,7 +1095,7 @@ app.post("/api/surveycto/sync", async (req, res) => {
         const refVerif = numSecuRaw || numeroRaw;
         if (refVerif) {
           const qHist = await client.query(
-            `SELECT id FROM historique WHERE TRIM(num_secu) = $1 OR TRIM(numero) = $1 LIMIT 1`,
+            `SELECT id FROM historique WHERE TRIM("NUM_SECU") = $1 OR TRIM("NUMERO") = $1 LIMIT 1`,
             [refVerif]
           );
           if (qHist.rows.length > 0) {
@@ -1060,20 +1107,27 @@ app.post("/api/surveycto/sync", async (req, res) => {
         continue;
       }
 
+      const agCarteMaj = normaliserAgence(carteRow.AGENCE) || (carteRow.AGENCE || "").toString().trim();
+      const sousPrefMaj =
+        normaliserTexte(carteRow["SOUS-PREFECTURE"] || "") ||
+        normaliserTexte(carteRow.LIEU_PRECIS || "") ||
+        agCarteMaj;
+
       await client.query(
         `INSERT INTO historique (
-          rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis,
-          retire_par, telephone_retrait, date_retrait, agence_retrait
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+          "RANGEMENT", "NUM_SECU", "NOM", "PRENOMS", "DATE_NAISSANCE", "NUMERO", "AGENCE", "SOUS-PREFECTURE", "LIEU_PRECIS",
+          "RETIRE_PAR", "TELEPHONE_RETRAIT", "DATE_RETRAIT", "AGENCE_RETRAIT"
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
         [
-          carteRow.rangement || "",
-          formaterNumSecu(carteRow.num_secu, carteRow.numero),
-          carteRow.nom || "",
-          carteRow.prenoms || "",
-          formaterDateFR(carteRow.date_naissance),
-          carteRow.numero || "",
-          carteRow.agence || "",
-          carteRow.lieu_precis || "",
+          carteRow.RANGEMENT || "",
+          formaterNumSecu(carteRow.NUM_SECU, carteRow.NUMERO),
+          carteRow.NOM || "",
+          carteRow.PRENOMS || "",
+          formaterDateFR(carteRow.DATE_NAISSANCE),
+          carteRow.NUMERO || "",
+          agCarteMaj,
+          sousPrefMaj,
+          carteRow.LIEU_PRECIS || "",
           retirePar,
           telFormate,
           dateRetrait,
@@ -1099,24 +1153,26 @@ app.post("/api/surveycto/sync", async (req, res) => {
   }
 });
 
-// --- 10. Chargement du stock terrain (par agence et localité exacte) ---
+// --- 10. Chargement du stock terrain (répartition basée sur SOUS-PREFECTURE en MAJUSCULES) ---
 app.get("/api/terrain/cartes", async (req, res) => {
   try {
     const agenceFiltre = normaliserAgence(req.query.agence || "");
     const localiteFiltre = normaliserTexte(req.query.localite || "");
 
     const q = await pool.query(
-      `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis, statut_transfert
+      `SELECT id, "RANGEMENT", "NUM_SECU", "NOM", "PRENOMS", "DATE_NAISSANCE", "NUMERO", "AGENCE", "SOUS-PREFECTURE", "LIEU_PRECIS", "STATUT_TRANSFERT"
        FROM cartes
-       ORDER BY nom ASC, prenoms ASC, id ASC`
+       ORDER BY "NOM" ASC, "PRENOMS" ASC, id ASC`
     );
 
     const cartesFiltrees = [];
 
     for (const r of q.rows) {
-      const agNorm = normaliserAgence(r.agence);
-      const lieuBrut = (r.lieu_precis || "").toString().trim();
-      const lieuNorm = normaliserTexte(lieuBrut);
+      const agNorm = normaliserAgence(r.AGENCE) || normaliserTexte(r.AGENCE || "");
+      const sousPrefMaj = normaliserTexte(r["SOUS-PREFECTURE"] || "");
+      const lieuBrut = (r.LIEU_PRECIS || "").toString().trim();
+      const lieuMaj = normaliserTexte(lieuBrut);
+      const referenceFiltre = sousPrefMaj || lieuMaj;
 
       if (agenceFiltre && agNorm !== agenceFiltre) {
         continue;
@@ -1124,8 +1180,8 @@ app.get("/api/terrain/cartes", async (req, res) => {
 
       if (localiteFiltre) {
         const correspondLocalite =
-          lieuNorm === localiteFiltre ||
-          (localiteFiltre === agNorm && lieuNorm === "");
+          referenceFiltre === localiteFiltre ||
+          (localiteFiltre === agNorm && referenceFiltre === "");
         if (!correspondLocalite) {
           continue;
         }
@@ -1133,15 +1189,16 @@ app.get("/api/terrain/cartes", async (req, res) => {
 
       cartesFiltrees.push({
         id: r.id,
-        rangement: (r.rangement || "Non défini").toString().trim(),
-        numSecu: formaterNumSecu(r.num_secu, r.numero),
-        numSecuBrut: (r.num_secu || "").toString().trim(),
-        numero: (r.numero || "").toString().trim(),
-        nom: (r.nom || "").toString().trim(),
-        prenoms: (r.prenoms || "").toString().trim(),
-        dateNaissance: formaterDateFR(r.date_naissance),
-        agence: agNorm || (r.agence || "").toString().trim(),
-        lieuPrecis: lieuBrut || agNorm
+        rangement: (r.RANGEMENT || "Non défini").toString().trim(),
+        numSecu: formaterNumSecu(r.NUM_SECU, r.NUMERO),
+        numSecuBrut: (r.NUM_SECU || "").toString().trim(),
+        numero: (r.NUMERO || "").toString().trim(),
+        nom: (r.NOM || "").toString().trim(),
+        prenoms: (r.PRENOMS || "").toString().trim(),
+        dateNaissance: formaterDateFR(r.DATE_NAISSANCE),
+        agence: agNorm || (r.AGENCE || "").toString().trim(),
+        sousPrefecture: sousPrefMaj || agNorm,
+        lieuPrecis: lieuBrut || sousPrefMaj || agNorm
       });
     }
 
@@ -1187,7 +1244,7 @@ app.post("/api/terrain/sync", async (req, res) => {
       const telFormate = formaterTelephone10(item.telephoneRetrait || "");
       const agCarte = normaliserAgence(item.agence || agenceParDefaut) || agenceParDefaut;
       const agenceRetrait =
-        (item.agenceRetrait || "").toString().trim() || `${agCarte}-(${identifiantAgent})`;
+        normaliserTexte(item.agenceRetrait || "") || `${agCarte}-(${identifiantAgent})`;
       const dateRetrait =
         (item.dateRetrait || "").toString().trim() || formaterDateFR(new Date());
 
@@ -1200,7 +1257,7 @@ app.post("/api/terrain/sync", async (req, res) => {
 
       if (Number.isInteger(idCarte) && idCarte > 0) {
         const qId = await client.query(
-          `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis
+          `SELECT id, "RANGEMENT", "NUM_SECU", "NOM", "PRENOMS", "DATE_NAISSANCE", "NUMERO", "AGENCE", "SOUS-PREFECTURE", "LIEU_PRECIS"
            FROM cartes WHERE id = $1 FOR UPDATE`,
           [idCarte]
         );
@@ -1209,8 +1266,8 @@ app.post("/api/terrain/sync", async (req, res) => {
 
       if (!carteRow && numSecu && numSecu !== "Non renseigné") {
         const qSecu = await client.query(
-          `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis
-           FROM cartes WHERE TRIM(num_secu) = $1 FOR UPDATE LIMIT 1`,
+          `SELECT id, "RANGEMENT", "NUM_SECU", "NOM", "PRENOMS", "DATE_NAISSANCE", "NUMERO", "AGENCE", "SOUS-PREFECTURE", "LIEU_PRECIS"
+           FROM cartes WHERE TRIM("NUM_SECU") = $1 FOR UPDATE LIMIT 1`,
           [numSecu]
         );
         if (qSecu.rows.length > 0) carteRow = qSecu.rows[0];
@@ -1218,8 +1275,8 @@ app.post("/api/terrain/sync", async (req, res) => {
 
       if (!carteRow && numero) {
         const qNum = await client.query(
-          `SELECT id, rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis
-           FROM cartes WHERE TRIM(numero) = $1 FOR UPDATE LIMIT 1`,
+          `SELECT id, "RANGEMENT", "NUM_SECU", "NOM", "PRENOMS", "DATE_NAISSANCE", "NUMERO", "AGENCE", "SOUS-PREFECTURE", "LIEU_PRECIS"
+           FROM cartes WHERE TRIM("NUMERO") = $1 FOR UPDATE LIMIT 1`,
           [numero]
         );
         if (qNum.rows.length > 0) carteRow = qNum.rows[0];
@@ -1229,7 +1286,7 @@ app.post("/api/terrain/sync", async (req, res) => {
         const refVerif = (numSecu && numSecu !== "Non renseigné" ? numSecu : "") || numero;
         if (refVerif) {
           const qHist = await client.query(
-            `SELECT id FROM historique WHERE TRIM(num_secu) = $1 OR TRIM(numero) = $1 LIMIT 1`,
+            `SELECT id FROM historique WHERE TRIM("NUM_SECU") = $1 OR TRIM("NUMERO") = $1 LIMIT 1`,
             [refVerif]
           );
           if (qHist.rows.length > 0) {
@@ -1242,20 +1299,27 @@ app.post("/api/terrain/sync", async (req, res) => {
         continue;
       }
 
+      const agCarteMaj = normaliserAgence(carteRow.AGENCE) || agCarte;
+      const sousPrefMaj =
+        normaliserTexte(carteRow["SOUS-PREFECTURE"] || "") ||
+        normaliserTexte(carteRow.LIEU_PRECIS || "") ||
+        agCarteMaj;
+
       await client.query(
         `INSERT INTO historique (
-          rangement, num_secu, nom, prenoms, date_naissance, numero, agence, lieu_precis,
-          retire_par, telephone_retrait, date_retrait, agence_retrait
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+          "RANGEMENT", "NUM_SECU", "NOM", "PRENOMS", "DATE_NAISSANCE", "NUMERO", "AGENCE", "SOUS-PREFECTURE", "LIEU_PRECIS",
+          "RETIRE_PAR", "TELEPHONE_RETRAIT", "DATE_RETRAIT", "AGENCE_RETRAIT"
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
         [
-          carteRow.rangement || "",
-          formaterNumSecu(carteRow.num_secu, carteRow.numero),
-          carteRow.nom || "",
-          carteRow.prenoms || "",
-          formaterDateFR(carteRow.date_naissance),
-          carteRow.numero || "",
-          carteRow.agence || agCarte,
-          carteRow.lieu_precis || "",
+          carteRow.RANGEMENT || "",
+          formaterNumSecu(carteRow.NUM_SECU, carteRow.NUMERO),
+          carteRow.NOM || "",
+          carteRow.PRENOMS || "",
+          formaterDateFR(carteRow.DATE_NAISSANCE),
+          carteRow.NUMERO || "",
+          agCarteMaj,
+          sousPrefMaj,
+          carteRow.LIEU_PRECIS || "",
           retirePar,
           telFormate,
           dateRetrait,
